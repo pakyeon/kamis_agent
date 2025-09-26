@@ -1,9 +1,8 @@
 # -*- coding: utf-8 -*-
+import os, time, requests
 import sqlite3
-from typing import List, Dict, Optional, Iterable
 import pandas as pd
-import os
-import requests
+from typing import List, Dict, Optional, Iterable
 
 # ============ 사용자 설정 ============
 EXCEL_PATH = "농축수산물 품목 및 등급 코드표.xlsx"
@@ -415,10 +414,27 @@ def load_to_sqlite(df: pd.DataFrame, sqlite_path: str, table: str):
         create_indexes(conn, table)
 
 
-def download_if_needed(path: str, url: str, headers: Dict[str, str] | None = None):
-    """path가 없으면 url에서 받아 저장한다."""
+def download_if_needed(
+    path: str, url: str, headers: Dict[str, str] | None = None, max_age_hours: int = 24
+):
+    """
+    path가 없거나, 마지막 수정 시간이 max_age_hours 이상 지났으면 url에서 받아 저장한다.
+    """
+    # 파일이 이미 존재하면 수정된 시간 확인
     if os.path.exists(path):
-        return
+        file_age_hours = (time.time() - os.path.getmtime(path)) / 3600
+        if file_age_hours < max_age_hours:
+            # 24시간 이내라면 재다운로드 안 함
+            print(
+                f"[download] 이미 최신 파일이 존재합니다. ({file_age_hours:.1f}시간 경과)"
+            )
+            return
+        else:
+            print(
+                f"[download] 파일이 {file_age_hours:.1f}시간 경과. 새로 다운로드합니다."
+            )
+
+    # 다운로드 실행
     h = headers or {}
     r = requests.get(url, headers=h, timeout=60)
     r.raise_for_status()
