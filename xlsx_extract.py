@@ -33,9 +33,9 @@ SCHEMA_MAPPING: Dict[str, str] = {
     "부류명": "category_name",
     "품목코드": "product_code",
     "품목명": "product_name",
-    "품목코드(itemcode)": "item_code",
     "품종코드": "kind_code",
     "품종명": "kind_name",
+    "축산_품종코드": "livestock_kind_code",
     "등급코드(p_productrankcode)": "productrank_code",
     "등급코드(p_graderank)": "graderank_code",
     "등급코드명": "rank_name",
@@ -49,10 +49,10 @@ SQLITE_SCHEMA: Dict[str, str] = {
     "category_name": "TEXT",
     "product_code": "TEXT",
     "product_name": "TEXT",
-    "item_code": "TEXT",
     "item_name": "TEXT",
     "kind_code": "TEXT",
     "kind_name": "TEXT",
+    "livestock_kind_code": "TEXT",
     "productrank_code": "TEXT",
     "graderank_code": "TEXT",
     "rank_name": "TEXT",
@@ -148,16 +148,14 @@ def extract_livestock(path: str) -> pd.DataFrame:
     ]
     df = read_sheet_with_header(path, SHEET_LIVESTOCK, wanted)
 
-    # ★ 축산물 시트에 부류코드 '500'과 부류명 '축산물' 추가
     df["부류코드"] = "500"
     df["부류명"] = "축산물"
 
-    # 컬럼명 표준화 - 등급명을 등급코드(periodProductName)으로 변경!
     rename_map = {
         "품목코드(itemcode)": "품목코드",
-        "품종코드(kindcode)": "품종코드",
+        "품종코드(kindcode)": "축산_품종코드",
         "등급코드(periodProductList)": "등급코드(periodProductList)",
-        "등급명": "등급코드(periodProductName)",  # ← 변경!
+        "등급명": "등급코드(periodProductName)",
     }
     df = df.rename(columns=rename_map)
 
@@ -168,6 +166,7 @@ def extract_livestock(path: str) -> pd.DataFrame:
             "품목코드",
             "품목명",
             "품종코드",
+            "축산_품종코드",
             "품종명",
             "등급코드(periodProductList)",
             "등급코드(periodProductName)",
@@ -279,7 +278,7 @@ def merge_hierarchically(path: str) -> pd.DataFrame:
     print(f"품종 조인 후: {len(result)}행")
 
     # 4. 축산물 데이터 조인 (부류코드='500' 기준)
-    livestock_merge_cols = ["부류코드", "품목코드", "품종코드"]
+    livestock_merge_cols = ["부류코드", "품목코드"]
     result = result.merge(
         df_livestock, on=livestock_merge_cols, how="outer", suffixes=("", "_livestock")
     )
@@ -396,8 +395,8 @@ def create_indexes(conn: sqlite3.Connection, table: str):
     idx_cols = [
         ("idx_category_code", "category_code"),
         ("idx_product_code", "product_code"),
-        ("idx_item_code", "item_code"),
         ("idx_kind_code", "kind_code"),
+        ("idx_livestock_kind_code", "livestock_kind_code"),
         ("idx_productrank_code", "productrank_code"),
         ("idx_graderank_code", "graderank_code"),
     ]
