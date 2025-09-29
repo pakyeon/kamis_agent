@@ -45,11 +45,10 @@ SCHEMA_MAPPING: Dict[str, str] = {
 
 # DB 테이블 정의(모두 TEXT) - 축산물 등급명 컬럼 추가
 SQLITE_SCHEMA: Dict[str, str] = {
-    "category_code": "TEXT",
-    "category_name": "TEXT",
-    "product_code": "TEXT",
-    "product_name": "TEXT",
-    "item_name": "TEXT",
+    "category_code": "TEXT NOT NULL",
+    "category_name": "TEXT NOT NULL",
+    "product_code": "TEXT NOT NULL",
+    "product_name": "TEXT NOT NULL",
     "kind_code": "TEXT",
     "kind_name": "TEXT",
     "livestock_kind_code": "TEXT",
@@ -165,7 +164,6 @@ def extract_livestock(path: str) -> pd.DataFrame:
             "부류명",
             "품목코드",
             "품목명",
-            "품종코드",
             "축산_품종코드",
             "품종명",
             "등급코드(periodProductList)",
@@ -371,13 +369,6 @@ def map_to_final_schema(df: pd.DataFrame) -> pd.DataFrame:
             else pd.Series(dtype="string")
         )
 
-    # item_name = 품목명과 동일
-    out["item_name"] = (
-        df["품목명"].astype("string")
-        if "품목명" in df.columns
-        else pd.Series(dtype="string")
-    )
-
     # 전체 string 통일 + 중복 제거
     for c in out.columns:
         out[c] = out[c].astype("string")
@@ -405,8 +396,22 @@ def create_indexes(conn: sqlite3.Connection, table: str):
 
 
 def load_to_sqlite(df: pd.DataFrame, sqlite_path: str, table: str):
+    # ✅ 필수 컬럼 보정
+    required = ["category_code", "category_name", "product_code", "product_name"]
+    df = df.copy()
+    for c in required:
+        if c in df.columns:
+            df[c] = df[c].astype("string").str.strip()
+
+    # 빈 문자열을 NA로 치환 후 드롭
+    df[required] = df[required].replace("", pd.NA)
+    before = len(df)
+    df = df.dropna(subset=required)
+    dropped = before - len(df)
+    if dropped > 0:
+        print(f"[warn] NOT NULL 위반 방지를 위해 {dropped}행 제거")
+
     with sqlite3.connect(sqlite_path) as conn:
-        # 기존 테이블 삭제 후 재생성 (replace 모드)
         conn.execute(f'DROP TABLE IF EXISTS "{table}";')
         create_sqlite_table(conn, table, SQLITE_SCHEMA)
         df.to_sql(table, conn, if_exists="append", index=False)
