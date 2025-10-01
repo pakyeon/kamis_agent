@@ -1,17 +1,17 @@
 from __future__ import annotations
-import os, re, requests
-from typing import Optional, Dict, Any, List, Sequence, Annotated, TypedDict, Literal
-from datetime import datetime, timedelta
-from dateutil.parser import parse as dtparse
-from pydantic import BaseModel
+import os, requests
+from typing import Optional, Dict, Any, Sequence, Annotated, Literal
+from datetime import datetime
+from pydantic import BaseModel, Field
 
 # LangChain / LangGraph
 from langchain_openai import ChatOpenAI
-from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, BaseMessage
+from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 from langchain.tools import tool
 from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages, AnyMessage
 from langgraph.prebuilt import ToolNode
+from typing_extensions import TypedDict
 
 from dotenv import load_dotenv
 
@@ -22,144 +22,164 @@ OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 KAMIS_CERT_KEY = os.environ.get("KAMIS_API_KEY")
 KAMIS_CERT_ID = os.environ.get("KAMIS_CERT_ID")
 
-# KAMIS API URL
 KAMIS_URL = "http://www.kamis.or.kr/service/price/xml.do?action=dailyCountyList"
 
 # ===========================================
-# 핵심 기능 1: 기본 정보 제공 (LLM 판단용 참고 자료)
+# Tool Schema 정의
 # ===========================================
 
-# 소매가격 지역 코드 정보
-RETAIL_REGION_INFO = {
-    "1101": "서울",
-    "2100": "부산",
-    "2200": "대구",
-    "2300": "인천",
-    "2401": "광주",
-    "2501": "대전",
-    "2601": "울산",
-    "3111": "수원",
-    "3214": "강릉",
-    "3211": "춘천",
-    "3311": "청주",
-    "3511": "전주",
-    "3711": "포항",
-    "3911": "제주",
-    "3113": "의정부",
-    "3613": "순천",
-    "3714": "안동",
-    "3814": "창원",
-    "3145": "용인",
-    "2701": "세종",
-    "3112": "성남",
-    "3138": "고양",
-    "3411": "천안",
-    "3818": "김해",
-}
 
-# 도매가격 지역 코드 정보
-WHOLESALE_REGION_INFO = {
-    "1101": "서울",
-    "2100": "부산",
-    "2200": "대구",
-    "2401": "광주",
-    "2501": "대전",
-}
+class KamisCountyPriceQuery(BaseModel):
+    """KAMIS 최근일자 지역별 도소매가격정보 조회 파라미터 (상품 기준)"""
+
+    p_countycode: str = Field(
+        "1101",
+        description=(
+            "지역 코드 (필수):\n\n"
+            "소매가격 가능 지역:\n"
+            "- '1101': 서울, '2100': 부산, '2200': 대구, '2300': 인천\n"
+            "- '2401': 광주, '2501': 대전, '2601': 울산, '2701': 세종\n"
+            "- '3111': 수원, '3112': 성남, '3113': 의정부, '3138': 고양, '3145': 용인\n"
+            "- '3211': 춘천, '3214': 강릉, '3311': 청주, '3411': 천안\n"
+            "- '3511': 전주, '3613': 순천, '3711': 포항, '3714': 안동\n"
+            "- '3814': 창원, '3818': 김해, '3911': 제주\n\n"
+            "도매가격 가능 지역:\n"
+            "- '1101': 서울, '2100': 부산, '2200': 대구\n"
+            "- '2401': 광주, '2501': 대전\n\n"
+            "기본값: '1101' (서울)\n"
+            "주의: 도매 조회시 도매 가능 지역만 선택 가능!"
+        ),
+    )
+
+    p_returntype: Literal["json", "xml"] = Field(
+        "json",
+        description=(
+            "응답 형식:\n"
+            "- 'json': JSON 데이터 형식\n"
+            "- 'xml': XML 데이터 형식\n"
+            "기본값: 'json'"
+        ),
+    )
+
+    # API 인증 정보 (내부적으로 자동 설정)
+    p_cert_key: str = Field(default="", exclude=True)
+    p_cert_id: str = Field(default="", exclude=True)
 
 
-@tool("kamis_param_infer")
-def kamis_param_infer_tool(query: str) -> Dict[str, Any]:
+# ===========================================
+# Tool 구현
+# ===========================================
+
+
+@tool("get_kamis_county_price", args_schema=KamisCountyPriceQuery)
+def get_kamis_county_price(
+    p_countycode: str = "1101",
+    p_returntype: Literal["json", "xml"] = "json",
+) -> Dict[str, Any]:
     """
-    사용자 자연어 쿼리 분석을 위한 기본 정보 제공
-    LLM이 모든 파라미터를 직접 판단하도록 안내
+    KAMIS(농산물유통정보) API를 통해 특정 지역의 최근일자 도소매 가격 정보를 조회합니다.
+
+    이 API는 지역별(시/도 단위) 품목별 최신 가격 정보를 제공합니다.
+    - 특정 지역 기준 가격 조회
+    - 도매/소매 가격이 함께 제공됨
+    - 해당 지역의 최신 데이터만 제공
+
+    사용 시점:
+    - 사용자가 특정 지역의 가격을 요청할 때 ("서울", "부산" 등)
+    - 지역별 가격 비교가 필요할 때
+    - 특정 도시의 현재 시세를 알고 싶을 때
+
+    참고:
+    - 전국 평균이나 카테고리별 조회는 get_kamis_price 사용
+    - 전체 지역 현황은 get_kamis_recent_sales 사용
+    - 지역 코드는 도매/소매에 따라 선택 가능한 범위가 다름
     """
-
-    today = datetime.now().date().strftime("%Y-%m-%d")
-
-    guide = f"""
-사용자 요청을 분석하여 KAMIS API 파라미터를 설정하세요.
-
-=== 오늘 날짜 ===
-오늘은 {today} 입니다.
-
-=== 설정할 파라미터 ===
-
-1. 출력 형식 여부 (p_returntype):
-   - json: Json 데이터 형식
-   - xml: XML 데이터 형식
-
-2. 지역 코드 (p_countrycode) - 선택사항:
-   소매가격 선택가능 지역:
-{chr(10).join([f'     - {code}: {name}' for code, name in RETAIL_REGION_INFO.items()])}
-   
-   도매가격 선택가능 지역:
-{chr(10).join([f'     - {code}: {name}' for code, name in WHOLESALE_REGION_INFO.items()])}
-
-   주의: 소매가격과 도매가격은 선택 가능한 지역이 다릅니다!
-
-사용자 요청: "{query}"
-
-위 정보를 바탕으로 kamis_daily_price_by_category 도구를 적절한 파라미터와 함께 호출하세요.
-소매/도매 구분에 따라 해당하는 지역만 선택할 수 있음에 주의하세요.
-"""
-
-    return {
-        "guide": guide,
-        "today": today,
-        "retail_regions": RETAIL_REGION_INFO,
-        "wholesale_regions": WHOLESALE_REGION_INFO,
-        "_note": "LLM이 사용자 요청을 분석하여 적절한 파라미터로 kamis_daily_price_by_category를 호출해야 합니다. 소매/도매에 따라 지역 선택이 제한됩니다.",
+    # API 인증 정보 자동 설정
+    params = {
+        "action": "dailyCountyList",
+        "p_cert_key": KAMIS_CERT_KEY,
+        "p_cert_id": KAMIS_CERT_ID,
+        "p_countycode": p_countycode,
+        "p_returntype": p_returntype,
     }
 
-
-# ===========================================
-# 핵심 기능 2: KAMIS API 호출
-# ===========================================
-class KamisParams(BaseModel):
-    p_cert_key: str
-    p_cert_id: str
-    p_returntype: Literal["json", "xml"] = "json"
-    p_countycode: Optional[str] = "1101"
-
-
-def call_kamis_api(params: KamisParams) -> Dict[str, Any]:
-    """KAMIS API 호출"""
-    query_params = params.model_dump(exclude_none=True)
-    query_params["action"] = "dailyCountyList"
-
-    response = requests.get(KAMIS_URL, params=query_params)
-    return response.json()
-
-
-@tool("kamis_daily_price_by_category", args_schema=KamisParams)
-def kamis_tool(**kwargs) -> Dict[str, Any]:
-    """KAMIS 최근일자 지역별 도소매가격정보(상품 기준)"""
-    if not kwargs.get("p_cert_key"):
-        kwargs["p_cert_key"] = KAMIS_CERT_KEY
-    if not kwargs.get("p_cert_id"):
-        kwargs["p_cert_id"] = KAMIS_CERT_ID
-
-    params = KamisParams(**kwargs)
-    result = call_kamis_api(params)
-    return result
+    try:
+        response = requests.get(KAMIS_URL, params=params, timeout=10)
+        response.raise_for_status()
+        return response.json()
+    except Exception as e:
+        return {"error": str(e), "message": "API 호출 실패"}
 
 
 # ===========================================
-# 핵심 기능 3: LLM Agent 구성
+# Agent 구성
 # ===========================================
+
+
 class AgentState(TypedDict):
     messages: Annotated[Sequence[AnyMessage], add_messages]
 
 
-def build_kamis_agent():
-    """KAMIS 조회 에이전트 생성"""
+SYSTEM_PROMPT = f"""KAMIS 지역별 도소매가격 조회 서브시스템.
 
-    # LLM 설정
-    llm = ChatOpenAI(model="gpt-5-mini", temperature=0)
-    tools = [kamis_param_infer_tool, kamis_tool]
+## 입력
+특정 지역의 농산물 가격 조회 요청 (지역명 포함)
+
+## 기능 특성
+- **지역 기준 조회**: 특정 시/도의 가격 정보
+- **최신 데이터**: 해당 지역의 가장 최근 업데이트된 가격
+- **도소매 통합**: 도매가/소매가 함께 제공
+- **품목별 제공**: 해당 지역에서 거래되는 품목들
+
+## 처리
+1. 질의 분석:
+   - 지역명 추출 → 지역 코드로 변환
+     * 서울: 1101, 부산: 2100, 대구: 2200, 인천: 2300
+     * 광주: 2401, 대전: 2501, 울산: 2601, 세종: 2701
+     * 수원: 3111, 춘천: 3211, 청주: 3311, 전주: 3511
+     * 제주: 3911, 기타 도시 코드는 tool description 참조
+   
+   - 지역 미지정시: 서울(1101) 기본값
+
+2. get_kamis_county_price 도구로 조회
+   - 도매가격 요청시 도매 가능 지역만 선택
+   - 불가능한 지역인 경우 사용자에게 안내
+
+## 출력 형식
+```
+[조회 정보]
+지역: {{지역명}} ({{지역코드}})
+조회 시점: {{API 반환 날짜}}
+
+[가격 현황]
+{{데이터}}
+
+[참고사항]
+{{추가 설명}}
+```
+
+## 지역별 처리 규칙
+1. 소매가격: 모든 주요 도시 조회 가능
+2. 도매가격: 서울, 부산, 대구, 광주, 대전만 가능
+3. 사용자가 도매+지방 도시 요청시:
+   - 불가능함을 안내
+   - 가능한 대안 제시 (가까운 도매 가능 지역 또는 소매 가격)
+
+조회 실패시 오류 원인 명시. 불필요한 인사말, 부연설명 생략."""
+
+
+def build_kamis_county_agent():
+    """KAMIS 지역별 가격 조회 에이전트 생성"""
+
+    llm = ChatOpenAI(
+        model="gpt-5-mini",
+        temperature=0,
+        api_key=OPENAI_API_KEY,
+        reasoning_effort="minimal",
+    )
+    tools = [get_kamis_county_price]
     llm_with_tools = llm.bind_tools(tools)
 
-    # 그래프 생성
     graph = StateGraph(AgentState)
 
     def agent_node(state: AgentState):
@@ -185,41 +205,48 @@ def build_kamis_agent():
 
 
 # ===========================================
-# 사용 예시
+# 사용자 인터페이스
 # ===========================================
-SYSTEM_PROMPT = """당신은 KAMIS 농산물 가격 조회 도우미입니다.
-
-사용자가 가격 조회를 요청하면 다음 단계를 따르세요:
-
-1. 먼저 kamis_param_infer 도구를 호출하여 기본 정보와 가이드를 받으세요.
-2. 사용자 질의를 분석하여 다음을 판단하세요:
-    - 소매/도매: 소비자 가격(소매) vs 시장 가격(도매)?
-    - 지역: 특정 지역이 언급되었는가? (소매/도매별 지역 제한 확인)
-    - 출력 형식: 어떤 형식으로 반환해야 하는가? 
-
-3. 판단한 결과로 kamis_daily_price_by_category 도구를 호출하세요.
-4. 결과를 사용자에게 친화적으로 설명하세요.
-
-중요 규칙: 
-- 모든 파라미터는 사용자 요청과 컨텍스트를 바탕으로 직접 판단하세요.
-- 소매가격과 도매가격은 조회 가능한 지역이 다릅니다! 반드시 확인하세요.
-- 애매한 경우 기본 옵션을 선택하세요.
-- 날짜가 명시되지 않으면 최신 데이터를 조회하도록 하세요.
-- 사용자가 요청한 시점의 데이터가 "-"인 경우 반드시 최신 가격을 찾아서 답변하고, 시점이 다른 이유에 대해서 설명하세요.
-- 지역 코드가 해당 소매/도매에서 지원되지 않는 경우, 사용자에게 알리고 대안을 제시하세요."""
 
 
-def query_kamis(user_query: str):
-    """KAMIS 조회 실행"""
-    app = build_kamis_agent()
+def query_kamis_county_price(user_query: str, verbose: bool = False) -> str:
+    """
+    KAMIS 지역별 가격 조회 실행
+
+    Args:
+        user_query: 사용자 질의 (예: "부산 소매 시금치 가격 알려줘")
+        verbose: True시 전체 메시지 히스토리 출력
+
+    Returns:
+        구조화된 지역별 가격 정보 텍스트
+    """
+    app = build_kamis_county_agent()
 
     messages = [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=user_query)]
 
     result = app.invoke({"messages": messages})
+
+    if verbose:
+        print("=== 전체 대화 히스토리 ===")
+        for msg in result["messages"]:
+            print(f"\n[{msg.__class__.__name__}]")
+            print(msg.content if hasattr(msg, "content") else msg)
+        print("\n" + "=" * 50 + "\n")
+
     return result["messages"][-1].content
 
 
-# 테스트 예시
+# ===========================================
+# 테스트
+# ===========================================
+
 if __name__ == "__main__":
-    result = query_kamis("오늘 부산 소매 시금치 가격을 알려줘.")
-    print(result)
+    # 테스트 케이스
+    test_queries = "가장 최근 부산 소매 시금치 가격 알려줘"
+
+    print("🌾 KAMIS 지역별 가격 조회 에이전트 테스트\n")
+
+    query = test_queries
+    print(f"질문: {query}")
+    print(f"답변:\n{query_kamis_county_price(query)}")
+    print("-" * 80)

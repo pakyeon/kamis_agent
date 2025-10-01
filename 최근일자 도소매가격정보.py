@@ -1,98 +1,95 @@
 from __future__ import annotations
-import os, re, requests
-from typing import Optional, Dict, Any, List, Sequence, Annotated, TypedDict, Literal
-from datetime import datetime, timedelta
-from dateutil.parser import parse as dtparse
-from pydantic import BaseModel
+import os, requests
+from typing import Optional, Dict, Any, Sequence, Annotated, Literal
+from datetime import datetime
+from pydantic import BaseModel, Field
 
 # LangChain / LangGraph
 from langchain_openai import ChatOpenAI
-from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, BaseMessage
+from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 from langchain.tools import tool
 from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages, AnyMessage
 from langgraph.prebuilt import ToolNode
+from typing_extensions import TypedDict
+
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # 환경 변수
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 KAMIS_CERT_KEY = os.environ.get("KAMIS_API_KEY")
 KAMIS_CERT_ID = os.environ.get("KAMIS_CERT_ID")
 
-# KAMIS API URL
 KAMIS_URL = "http://www.kamis.co.kr/service/price/xml.do?action=dailySalesList"
 
 # ===========================================
-# 핵심 기능 1: 기본 정보 제공 (LLM 판단용 참고 자료)
+# Tool Schema 정의
 # ===========================================
 
 
-@tool("kamis_param_infer")
-def kamis_param_infer_tool(query: str) -> Dict[str, Any]:
+class KamisRecentSalesQuery(BaseModel):
+    """KAMIS 최근일자 도소매가격정보 조회 파라미터 (상품 기준)"""
 
-    today = datetime.now().date().strftime("%Y-%m-%d")
+    p_returntype: Literal["json", "xml"] = Field(
+        "json",
+        description=(
+            "응답 형식:\n"
+            "- 'json': JSON 데이터 형식\n"
+            "- 'xml': XML 데이터 형식\n"
+            "기본값: 'json'"
+        ),
+    )
 
+    # API 인증 정보 (내부적으로 자동 설정)
+    p_cert_key: str = Field(default="", exclude=True)
+    p_cert_id: str = Field(default="", exclude=True)
+
+
+# ===========================================
+# Tool 구현
+# ===========================================
+
+
+@tool("get_kamis_recent_sales", args_schema=KamisRecentSalesQuery)
+def get_kamis_recent_sales(
+    p_returntype: Literal["json", "xml"] = "json",
+) -> Dict[str, Any]:
     """
-    사용자 자연어 쿼리 분석을 위한 기본 정보 제공
-    LLM이 모든 파라미터를 직접 판단하도록 안내
+    KAMIS(농산물유통정보) API를 통해 최근일자 도소매 가격 정보를 조회합니다.
+
+    이 API는 품목별(상품 기준) 최신 가격 정보를 제공합니다.
+    - 카테고리별 조회가 아닌 개별 품목별 최신 가격
+    - 도매/소매 가격이 함께 제공됨
+    - 별도의 날짜, 지역 지정 없이 최신 데이터 제공
+
+    사용 시점:
+    - 사용자가 특정 품목의 "최신" 또는 "오늘" 가격을 요청할 때
+    - 날짜나 지역 지정 없이 전반적인 가격 현황을 원할 때
+    - 여러 품목의 현재 시세를 비교하고 싶을 때
+
+    참고: 특정 날짜나 지역별 상세 조회가 필요한 경우
+    get_kamis_price 도구를 사용하세요.
     """
-
-    guide = f"""
-사용자 요청을 분석하여 KAMIS API 파라미터를 설정하세요.
-
-=== 오늘 날짜 ===
-오늘은 {today} 입니다.
-
-=== 설정할 파라미터 ===
-
-1. 출력 형식 여부 (p_returntype):
-   - json: Json 데이터 형식
-   - xml: XML 데이터 형식
-
-사용자 요청: "{query}"
-
-위 정보를 바탕으로 kamis_daily_price_by_category 도구를 적절한 파라미터와 함께 호출하세요.
-소매/도매 구분에 따라 해당하는 지역만 선택할 수 있음에 주의하세요.
-"""
-
-    return {
-        "guide": guide,
-        "_note": "LLM이 사용자 요청을 분석하여 적절한 파라미터로 kamis_daily_price_by_category를 호출해야 합니다.",
+    # API 인증 정보 자동 설정
+    params = {
+        "action": "dailySalesList",
+        "p_cert_key": KAMIS_CERT_KEY,
+        "p_cert_id": KAMIS_CERT_ID,
+        "p_returntype": p_returntype,
     }
 
-
-# ===========================================
-# 핵심 기능 2: KAMIS API 호출
-# ===========================================
-class KamisParams(BaseModel):
-    p_cert_key: str
-    p_cert_id: str
-    p_returntype: Literal["xml", "json"] = "json"
-
-
-def call_kamis_api(params: KamisParams) -> Dict[str, Any]:
-    """KAMIS API 호출"""
-    query_params = params.model_dump(exclude_none=True)
-    query_params["action"] = "dailySalesList"
-
-    response = requests.get(KAMIS_URL, params=query_params)
-    return response.json()
-
-
-@tool("kamis_daily_price_by_category", args_schema=KamisParams)
-def kamis_tool(**kwargs) -> Dict[str, Any]:
-    """KAMIS 최근일자 도소매가격정보(상품 기준)"""
-    if not kwargs.get("p_cert_key"):
-        kwargs["p_cert_key"] = KAMIS_CERT_KEY
-    if not kwargs.get("p_cert_id"):
-        kwargs["p_cert_id"] = KAMIS_CERT_ID
-
-    params = KamisParams(**kwargs)
-    result = call_kamis_api(params)
-    return result
+    try:
+        response = requests.get(KAMIS_URL, params=params, timeout=10)
+        response.raise_for_status()
+        return response.json()
+    except Exception as e:
+        return {"error": str(e), "message": "API 호출 실패"}
 
 
 # ===========================================
-# 핵심 기능 3: LLM Agent 구성
+# Agent 구성
 # ===========================================
 
 
@@ -100,15 +97,55 @@ class AgentState(TypedDict):
     messages: Annotated[Sequence[AnyMessage], add_messages]
 
 
-def build_kamis_agent():
-    """KAMIS 조회 에이전트 생성"""
+SYSTEM_PROMPT = f"""KAMIS 최근일자 도소매가격 조회 서브시스템.
 
-    # LLM 설정
-    llm = ChatOpenAI(model="gpt-5-mini", temperature=0)
-    tools = [kamis_param_infer_tool, kamis_tool]
+## 입력
+농산물 최신 가격 정보 조회 요청 (특정 품목명 또는 전체 현황)
+
+## 기능 특성
+- **최신 데이터 조회**: 가장 최근 업데이트된 가격 정보 제공
+- **품목별 조회**: 개별 상품 기준 (카테고리 전체가 아님)
+- **도소매 통합**: 도매가/소매가 함께 제공
+- **날짜/지역 미지정**: 시스템에서 최신 가능 데이터 자동 선택
+
+## 처리
+get_kamis_recent_sales 도구로 최신 가격 정보 조회
+
+## 출력 형식
+```
+[조회 정보]
+조회 시점: {{API 반환 날짜}}
+데이터 특성: 최근일자 기준 전국 평균
+
+[가격 현황]
+품목 | 도매가 | 소매가 | 단위
+-----|--------|--------|------
+{{데이터}}
+
+[참고사항]
+{{추가 설명}}
+```
+
+## 사용자 질의 유형별 처리
+1. "오늘 시금치 가격" → 최신 데이터에서 시금치 검색
+2. "현재 채소 가격 현황" → 전체 데이터에서 채소류 필터링
+3. "최근 가격 알려줘" → 전체 데이터 요약 제공
+
+조회 실패시 오류 원인 명시. 불필요한 인사말, 부연설명 생략."""
+
+
+def build_kamis_recent_sales_agent():
+    """KAMIS 최근 가격 조회 에이전트 생성"""
+
+    llm = ChatOpenAI(
+        model="gpt-5-mini",
+        temperature=0,
+        api_key=OPENAI_API_KEY,
+        reasoning_effort="minimal",
+    )
+    tools = [get_kamis_recent_sales]
     llm_with_tools = llm.bind_tools(tools)
 
-    # 그래프 생성
     graph = StateGraph(AgentState)
 
     def agent_node(state: AgentState):
@@ -134,37 +171,48 @@ def build_kamis_agent():
 
 
 # ===========================================
-# 사용 예시
+# 사용자 인터페이스
 # ===========================================
-SYSTEM_PROMPT = """당신은 KAMIS 농산물 가격 조회 도우미입니다.
-
-사용자가 가격 조회를 요청하면 다음 단계를 따르세요:
-
-1. 먼저 kamis_param_infer 도구를 호출하여 기본 정보와 가이드를 받으세요.
-2. 사용자 질의를 분석하여 다음을 판단하세요:
-    - 출력 형식: 어떤 형식으로 반환해야 하는가? 
-
-3. 판단한 결과로 kamis_daily_price_by_category 도구를 호출하세요.
-4. 결과를 사용자에게 친화적으로 설명하세요.
-
-중요 규칙: 
-- 모든 파라미터는 사용자 요청과 컨텍스트를 바탕으로 직접 판단하세요.
-- 애매한 경우 기본 옵션을 선택하세요.
-- 날짜가 명시되지 않으면 최신 데이터를 조회하도록 하세요.
-- 사용자가 요청한 시점의 데이터가 "-"인 경우 반드시 최신 가격을 찾아서 답변하고, 시점이 다른 이유에 대해서 설명하세요."""
 
 
-def query_kamis(user_query: str):
-    """KAMIS 조회 실행"""
-    app = build_kamis_agent()
+def query_kamis_recent_sales(user_query: str, verbose: bool = False) -> str:
+    """
+    KAMIS 최근 가격 조회 실행
+
+    Args:
+        user_query: 사용자 질의 (예: "오늘 시금치 가격 알려줘")
+        verbose: True시 전체 메시지 히스토리 출력
+
+    Returns:
+        구조화된 최신 가격 정보 텍스트
+    """
+    app = build_kamis_recent_sales_agent()
 
     messages = [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=user_query)]
 
     result = app.invoke({"messages": messages})
+
+    if verbose:
+        print("=== 전체 대화 히스토리 ===")
+        for msg in result["messages"]:
+            print(f"\n[{msg.__class__.__name__}]")
+            print(msg.content if hasattr(msg, "content") else msg)
+        print("\n" + "=" * 50 + "\n")
+
     return result["messages"][-1].content
 
 
-# 테스트 예시
+# ===========================================
+# 테스트
+# ===========================================
+
 if __name__ == "__main__":
-    result = query_kamis("오늘 시금치 가격을 알려줘.")
-    print(result)
+    # 테스트 케이스
+    test_queries = "최근 시금치 가격 알려줘"
+
+    print("🌾 KAMIS 최근일자 가격 조회 에이전트 테스트\n")
+
+    query = test_queries
+    print(f"질문: {query}")
+    print(f"답변:\n{query_kamis_recent_sales(query)}")
+    print("-" * 80)
