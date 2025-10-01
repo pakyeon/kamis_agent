@@ -77,7 +77,7 @@ def get_kamis_county_price(
     p_returntype: Literal["json", "xml"] = "json",
 ) -> Dict[str, Any]:
     """
-    KAMIS(농산물유통정보) API를 통해 특정 지역의 최근일자 도소매 가격 정보를 조회합니다.
+    KAMIS API를 통해 특정 지역의 최근일자 도소매 가격 정보를 조회합니다.
 
     이 API는 지역별(시/도 단위) 품목별 최신 가격 정보를 제공합니다.
     - 특정 지역 기준 가격 조회

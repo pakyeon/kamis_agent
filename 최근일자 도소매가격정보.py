@@ -57,7 +57,7 @@ def get_kamis_recent_sales(
     p_returntype: Literal["json", "xml"] = "json",
 ) -> Dict[str, Any]:
     """
-    KAMIS(농산물유통정보) API를 통해 최근일자 도소매 가격 정보를 조회합니다.
+    KAMIS API를 통해 최근일자 도소매 가격 정보를 조회합니다.
 
     이 API는 품목별(상품 기준) 최신 가격 정보를 제공합니다.
     - 카테고리별 조회가 아닌 개별 품목별 최신 가격
