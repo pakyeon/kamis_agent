@@ -18,6 +18,10 @@ DOWNLOAD_HEADERS = {
     "Referer": "https://www.kamis.or.kr/customer/board/board.do",
 }
 
+# 축산물 부류 코드 상수
+LIVESTOCK_CATEGORY_CODE = "500"
+LIVESTOCK_CATEGORY_NAME = "축산물"
+
 # 시트명
 SHEET_BURYU = "부류코드"
 SHEET_PUMMOK = "품목코드"
@@ -68,6 +72,18 @@ def _strip_str(x):
 def _drop_all_empty_rows(df: pd.DataFrame) -> pd.DataFrame:
     df = df.map(_strip_str).replace("", pd.NA)
     return df.dropna(how="all")
+
+
+def _merge_duplicate_columns(
+    df: pd.DataFrame, base_cols: List[str], suffix: str
+) -> pd.DataFrame:
+    """중복 컬럼 병합 헬퍼 함수"""
+    for col in base_cols:
+        dup_col = f"{col}{suffix}"
+        if dup_col in df.columns:
+            df[col] = df[col].fillna(df[dup_col])
+            df = df.drop(dup_col, axis=1)
+    return df
 
 
 def _find_header_row(
@@ -147,8 +163,8 @@ def extract_livestock(path: str) -> pd.DataFrame:
     ]
     df = read_sheet_with_header(path, SHEET_LIVESTOCK, wanted)
 
-    df["부류코드"] = "500"
-    df["부류명"] = "축산물"
+    df["부류코드"] = LIVESTOCK_CATEGORY_CODE
+    df["부류명"] = LIVESTOCK_CATEGORY_NAME
 
     rename_map = {
         "품목코드(itemcode)": "품목코드",
@@ -269,9 +285,7 @@ def merge_hierarchically(path: str) -> pd.DataFrame:
     )
 
     # 품목명 병합 (기존 데이터 우선)
-    result["품목명"] = result["품목명"].fillna(result.get("품목명_pumjong", pd.NA))
-    if "품목명_pumjong" in result.columns:
-        result = result.drop("품목명_pumjong", axis=1)
+    result = _merge_duplicate_columns(result, ["품목명"], "_pumjong")
 
     print(f"품종 조인 후: {len(result)}행")
 
@@ -282,11 +296,9 @@ def merge_hierarchically(path: str) -> pd.DataFrame:
     )
 
     # 중복 컬럼 병합 - 축산물 고유 등급 정보는 별도 처리
-    for col in ["부류명", "품목명", "품종명"]:
-        livestock_col = f"{col}_livestock"
-        if livestock_col in result.columns:
-            result[col] = result[col].fillna(result[livestock_col])
-            result = result.drop(livestock_col, axis=1)
+    result = _merge_duplicate_columns(
+        result, ["부류명", "품목명", "품종명"], "_livestock"
+    )
 
     print(f"축산물 조인 후: {len(result)}행")
 
@@ -297,22 +309,20 @@ def merge_hierarchically(path: str) -> pd.DataFrame:
     )
 
     # 중복 컬럼 병합
-    for col in ["부류명", "품목명", "품종명", "등급코드명"]:
-        sanmul_col = f"{col}_sanmul"
-        if sanmul_col in result.columns:
-            result[col] = result[col].fillna(result[sanmul_col])
-            result = result.drop(sanmul_col, axis=1)
+    result = _merge_duplicate_columns(
+        result, ["부류명", "품목명", "품종명", "등급코드명"], "_sanmul"
+    )
 
     print(f"산물 조인 후: {len(result)}행")
 
     # 6. 등급 데이터 조인
     if not df_rank.empty:
-        non_livestock_mask = result["부류코드"] != "500"
+        non_livestock_mask = result["부류코드"] != LIVESTOCK_CATEGORY_CODE
         livestock_data = result[~non_livestock_mask].copy()
         non_livestock_data = result[non_livestock_mask].copy()
 
         if not non_livestock_data.empty:
-            # 👇 [수정] cross join 전에 충돌할 수 있는 컬럼들을 미리 삭제합니다.
+            # cross join 전에 충돌할 수 있는 컬럼들을 미리 삭제합니다.
             # 이렇게 하면 merge 후에 _x, _y 같은 접미사가 붙는 것을 방지할 수 있습니다.
             cols_to_drop = [
                 col for col in df_rank.columns if col in non_livestock_data.columns
@@ -374,6 +384,65 @@ def map_to_final_schema(df: pd.DataFrame) -> pd.DataFrame:
         out[c] = out[c].astype("string")
 
     return out.drop_duplicates().reset_index(drop=True)
+
+
+def process_kamis_data(
+    excel_path: str = EXCEL_PATH,
+    sqlite_path: str = SQLITE_PATH,
+    table_name: str = SQLITE_TABLE,
+    auto_download: bool = True,
+    return_dataframe: bool = False,
+) -> Optional[pd.DataFrame]:
+    """
+    KAMIS 데이터 처리 메인 함수
+
+    Args:
+        excel_path: 엑셀 파일 경로 (기본값: EXCEL_PATH)
+        sqlite_path: SQLite DB 경로 (기본값: SQLITE_PATH)
+        table_name: 테이블명 (기본값: SQLITE_TABLE)
+        auto_download: 자동 다운로드 여부 (기본값: True)
+        return_dataframe: DataFrame 반환 여부 (기본값: False)
+
+    Returns:
+        return_dataframe=True인 경우 처리된 DataFrame 반환, 아니면 None
+
+    Examples:
+        # 기본 사용 (DB만 생성)
+        >>> process_kamis_data()
+
+        # DataFrame 받아서 추가 처리
+        >>> df = process_kamis_data(return_dataframe=True)
+        >>> filtered = df[df['category_name'] == '과일류']
+
+        # 커스텀 경로
+        >>> process_kamis_data(
+        ...     excel_path="custom.xlsx",
+        ...     sqlite_path="custom.db",
+        ...     auto_download=False
+        ... )
+    """
+    print("=== 관계형 병합 방식으로 데이터 처리 시작 ===")
+
+    if auto_download:
+        download_if_needed(excel_path, DOWNLOAD_URL, DOWNLOAD_HEADERS)
+
+    # 1. 관계형 조인으로 데이터 병합
+    merged_data = merge_hierarchically(excel_path)
+
+    # 2. 최종 스키마로 매핑
+    final_data = map_to_final_schema(merged_data)
+
+    # 3. SQLite에 저장
+    load_to_sqlite(final_data, sqlite_path, table_name)
+
+    print(f"\n[완료] SQLite 적재 완료!")
+    print(f"- 파일: {sqlite_path}")
+    print(f"- 테이블: {table_name}")
+    print(f"- 최종 행수: {len(final_data)}")
+
+    if return_dataframe:
+        return final_data
+    return None
 
 
 # ============ SQLite 관련 ============
@@ -448,24 +517,8 @@ def download_if_needed(
 
 
 def main():
-    print("=== 관계형 병합 방식으로 데이터 처리 시작 ===")
-
-    # 👇 추가: 엑셀 파일 없으면 먼저 내려받기
-    download_if_needed(EXCEL_PATH, DOWNLOAD_URL, DOWNLOAD_HEADERS)
-
-    # 1. 관계형 조인으로 데이터 병합
-    merged_data = merge_hierarchically(EXCEL_PATH)
-
-    # 2. 최종 스키마로 매핑
-    final_data = map_to_final_schema(merged_data)
-
-    # 3. SQLite에 저장
-    load_to_sqlite(final_data, SQLITE_PATH, SQLITE_TABLE)
-
-    print(f"\n[완료] SQLite 적재 완료!")
-    print(f"- 파일: {SQLITE_PATH}")
-    print(f"- 테이블: {SQLITE_TABLE}")
-    print(f"- 최종 행수: {len(final_data)}")
+    """스크립트 직접 실행 시 호출되는 함수"""
+    process_kamis_data()
 
 
 if __name__ == "__main__":
