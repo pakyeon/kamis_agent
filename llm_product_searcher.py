@@ -6,7 +6,8 @@ import json
 import os
 import logging
 import atexit
-from typing import List, Dict
+from typing import List, Dict, Set, Optional
+from collections import defaultdict
 
 from dotenv import load_dotenv
 from kiwipiepy import Kiwi
@@ -15,55 +16,59 @@ from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel
 
 load_dotenv()
-
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
 
 
-# LLM이 반환할 JSON 구조를 Pydantic 스키마로 정의
-class Keywords(BaseModel):
-    keywords: List[str]
+class HierarchicalKeywords(BaseModel):
+    categories: List[str] = []
+    products: List[str] = []
+    kinds: List[str] = []
+    grades: List[str] = []
 
 
-# 시스템 프롬프트: LLM의 역할과 규칙을 정의
-SYSTEM_PROMPT = """너는 문장에서 농축수산물의 품목만 추출하는 어시스턴트다. 다음 규칙을 반드시 지켜라:
-1) 품목만 추출하고, 품종/부위/가공형태/등급/브랜드는 제외한다. (예: ‘돼지고기’는 품목, ‘삼겹살’은 부위)
-2) 각 품목의 유사어와 동의어를 충분히 고려하되, 의미가 중복되는 표현만 선별한다.
-3) 문장에 2개 이상의 품목이 있으면 모두 추출한다."""
+SYSTEM_PROMPT = """너는 농축수산물 유통 정보 시스템의 검색 어시스턴트다. 
+사용자의 자연어 질문을 분석하여 다음 계층별로 키워드를 추출해야 한다:
 
-# 사용자 프롬프트: 실제 수행할 작업과 예시를 제공
-USER_PROMPT = """다음 문장에서 농축수산물의 "품목"과 관련된 검색 키워드를 추출해줘.
+1. 부류(category): 큰 분류 (예: 식량작물, 채소류, 특용작물, 과일류, 축산물, 수산물)
+2. 품목(product): 구체적인 상품명 (예: 쌀, 배추, 사과, 돼지, 고등어)
+3. 품종(kind): 품목의 세부 종류 (예: 캠벨얼리, 월동, 후지, 삼겹살, 안심)
+4. 등급(grade): 품질 등급 (예: 상품, 중품, 하품, 특大, 大, 中, 小)
 
-문장: "{query}"
+중요한 규칙:
+- 각 계층의 유사어/동의어를 포함할 수 있다.
+- 없는 계층은 빈 리스트로 반환한다.
+- 품종과 등급이 명시되지 않으면 추측하지 말고 빈 리스트로 둔다."""
 
-예시:
-입력: "사과랑 배 가격"
-출력: ["사과", "배"]
+USER_PROMPT = """다음 사용자 질문을 분석하여 계층별 키워드를 추출해줘.
 
-입력: "돼지고기 삼겹살 가격"
-출력: ["돼지고기", "돼지", "돈육"]
+질문: "{query}"
 
-입력: "소고기 안심 시세"
-출력: ["한우", "소", "소고기", "쇠고기", "우육"]"""
+입력: "돼지고기 삼겹살 1등급 가격 알려줘"
+출력: {{"categories": ["축산물"], "products": ["돼지고기", "돼지"], "kinds": ["삼겹살"], "grades": ["1등급"]}}
+
+입력: "한우 등심 1++등급은 얼마야?"
+출력: {{"categories": ["축산물"], "products": ["소고기", "소"], "kinds": ["등심"], "grades": ["1++등급"]}}
+
+입력: "후지 사과 상품 가격"
+출력: {{"categories": ["과일류"], "products": ["사과"], "kinds": ["후지"], "grades": ["상품"]}}"""
 
 
-class LLMProductSearcher:
-    """자연어 쿼리를 받아 LLM으로 품목 키워드를 추출하고, FTS5로 DB에서 상품을 검색하는 클래스"""
+class LLMHierarchicalSearcher:
+    """계층적 구조를 고려한 농축수산물 검색 클래스"""
 
     _SIMPLE_CLEAN_RE = re.compile(r"[^\w\s가-힣]")
     _WHITESPACE_RE = re.compile(r"\s+")
+    _DIGIT_RE = re.compile(r"\d+")
+    LIVESTOCK_CATEGORY_CODE = "500"
 
     def __init__(self, db_path: str):
         if not os.path.exists(db_path):
             raise FileNotFoundError(f"Database not found at: {db_path}")
 
         self.kiwi = Kiwi()
-        self._llm = None
-        self._structured_llm = None
-        self._prompt = None
-
-        # DB 연결 (프로세스 종료 시 자동 close)
+        self._llm = self._structured_llm = self._prompt = None
         self._connection = sqlite3.connect(db_path, check_same_thread=False)
         self._connection.row_factory = sqlite3.Row
         atexit.register(self._connection.close)
@@ -71,71 +76,53 @@ class LLMProductSearcher:
         self._setup_database()
         self._ensure_indexes()
 
-    # --- LLM 인스턴스 (Lazy Loading) ---
     @property
-    def llm(self) -> ChatOpenAI | None:
-        """LLM 인스턴스를 처음 사용할 때 로딩하여 메모리 효율성 증대"""
+    def llm(self) -> Optional[ChatOpenAI]:
         if self._llm is None:
             api_key = os.getenv("OPENAI_API_KEY")
-            model_name = os.getenv("OPENAI_MODEL", "gpt-5-nano")
             if api_key:
                 self._llm = ChatOpenAI(
-                    model=model_name,
+                    model=os.getenv("OPENAI_MODEL", "gpt-5-mini"),
                     temperature=0,
-                    api_key=api_key,
                     reasoning_effort="minimal",
+                    api_key=api_key,
                 )
         return self._llm
 
     @property
     def structured_llm(self):
-        """Pydantic 스키마(Keywords)를 사용하여 구조화된 출력(JSON)을 강제하는 LLM"""
-        if self._structured_llm is None and self.llm is not None:
-            self._structured_llm = self.llm.with_structured_output(Keywords)
+        if self._structured_llm is None and self.llm:
+            self._structured_llm = self.llm.with_structured_output(HierarchicalKeywords)
         return self._structured_llm
 
     @property
     def prompt(self) -> ChatPromptTemplate:
-        """LLM에 전달할 프롬프트 템플릿 (시스템 역할 + 사용자 요청)"""
         if self._prompt is None:
             self._prompt = ChatPromptTemplate.from_messages(
-                [
-                    ("system", SYSTEM_PROMPT),
-                    ("user", USER_PROMPT),
-                ]
+                [("system", SYSTEM_PROMPT), ("user", USER_PROMPT)]
             )
         return self._prompt
 
-    # --- Public Methods ---
-    def get_name_code_pairs_json(self, natural_query: str) -> str:
-        """자연어 쿼리를 받아 상품명과 코드 쌍을 JSON 문자열로 반환"""
-        expanded_keywords = self._extract_product_names(natural_query)
-        search_results = self._search_products(expanded_keywords)
+    def search_hierarchical(self, natural_query: str) -> List[Dict]:
+        """자연어 쿼리로 계층적 검색 수행 - 각 조합을 개별 항목으로 반환"""
+        keywords = self._extract_hierarchical_keywords(natural_query)
+        logging.info(f"추출된 키워드: {keywords}")
+        raw_results = self._search_with_hierarchy(keywords)
+        return self._organize_hierarchy(raw_results)
 
-        seen = set()
-        pairs = []
-        for r in search_results:
-            key = (r["name"], r["code"])
-            if key not in seen:
-                pairs.append({"product_name": r["name"], "product_code": r["code"]})
-                seen.add(key)
+    def get_full_hierarchy_json(self, natural_query: str) -> str:
+        """검색 결과를 JSON 문자열로 반환"""
+        return json.dumps(
+            self.search_hierarchical(natural_query), ensure_ascii=False, indent=2
+        )
 
-        return json.dumps(pairs, ensure_ascii=False, indent=2)
-
-    def get_name_code_pairs(self, natural_query: str) -> List[Dict[str, str]]:
-        """자연어 쿼리를 받아 상품명과 코드 쌍을 리스트로 반환"""
-        return json.loads(self.get_name_code_pairs_json(natural_query))
-
-    # --- DB 및 FTS5 설정 ---
     def _setup_database(self):
-        """검색에 필요한 테이블(items_clean, items_fts)을 준비"""
+        """기존 FTS5 설정 유지"""
         cur = self._connection.cursor()
 
-        # 원본의 안전한 로직으로 복원
-        items_clean_exists = cur.execute(
+        if not cur.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='items_clean'"
-        ).fetchone()
-        if not items_clean_exists:
+        ).fetchone():
             cur.execute(
                 """
                 CREATE TABLE items_clean AS
@@ -148,27 +135,25 @@ class LLMProductSearcher:
         try:
             cur.execute("ALTER TABLE items_clean ADD COLUMN tokenized_name TEXT")
         except sqlite3.OperationalError:
-            pass  # Column already exists
+            pass
 
-        fts_exists = cur.execute(
+        if not cur.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='items_fts'"
-        ).fetchone()
-        if not fts_exists:
+        ).fetchone():
             self._create_fts_table(cur)
         else:
             self._update_tokenized_data(cur)
 
         self._connection.commit()
-        logging.info("Korean-optimized FTS5 database ready.")
+        logging.info("Database ready for hierarchical search.")
 
     def _create_fts_table(self, cur: sqlite3.Cursor):
-        """FTS5 가상 테이블을 생성하고 초기 데이터를 채움"""
-        rows = cur.execute("SELECT rowid, product_name FROM items_clean").fetchall()
-        for row in rows:
-            tokenized = self._normalize_text(row["product_name"])
+        for row in cur.execute(
+            "SELECT rowid, product_name FROM items_clean"
+        ).fetchall():
             cur.execute(
                 "UPDATE items_clean SET tokenized_name = ? WHERE rowid = ?",
-                (tokenized, row["rowid"]),
+                (self._normalize_text(row["product_name"]), row["rowid"]),
             )
 
         cur.execute(
@@ -178,176 +163,462 @@ class LLMProductSearcher:
         """
         )
         cur.execute("INSERT INTO items_fts(items_fts) VALUES('rebuild')")
-        logging.info("FTS5 table created and indexed.")
 
     def _update_tokenized_data(self, cur: sqlite3.Cursor):
-        """기존 데이터 중 토큰화되지 않은 항목을 찾아 업데이트"""
-        rows = cur.execute(
+        for row in cur.execute(
             "SELECT rowid, product_name FROM items_clean WHERE tokenized_name IS NULL"
-        ).fetchall()
-        if rows:
-            for row in rows:
-                tokenized = self._normalize_text(row["product_name"])
-                cur.execute(
-                    "UPDATE items_clean SET tokenized_name = ? WHERE rowid = ?",
-                    (tokenized, row["rowid"]),
-                )
-            logging.info(f"Updated {len(rows)} tokenized records.")
+        ).fetchall():
+            cur.execute(
+                "UPDATE items_clean SET tokenized_name = ? WHERE rowid = ?",
+                (self._normalize_text(row["product_name"]), row["rowid"]),
+            )
 
     def _ensure_indexes(self):
-        """검색 성능 향상을 위한 DB 인덱스 생성"""
+        """계층적 검색을 위한 인덱스 추가 (축산물 등급 포함)"""
         cur = self._connection.cursor()
-        cur.execute(
-            "CREATE INDEX IF NOT EXISTS idx_items_clean_code ON items_clean(product_code)"
-        )
-        cur.execute(
-            "CREATE INDEX IF NOT EXISTS idx_items_clean_name ON items_clean(product_name)"
-        )
-        cur.execute(
-            "CREATE INDEX IF NOT EXISTS idx_items_clean_tok ON items_clean(tokenized_name)"
-        )
+        for idx_name, col_name in [
+            ("idx_category_code", "category_code"),
+            ("idx_product_code", "product_code"),
+            ("idx_kind_code", "kind_code"),
+            ("idx_livestock_kind", "livestock_kind_code"),
+            ("idx_productrank", "productrank_code"),
+            ("idx_graderank", "graderank_code"),
+            ("idx_category_name", "category_name"),
+            ("idx_kind_name", "kind_name"),
+            ("idx_rank_name", "rank_name"),
+            ("idx_period_product_list", "p_periodProductList"),
+            ("idx_period_product_name", "p_periodProductName"),
+        ]:
+            cur.execute(
+                f"CREATE INDEX IF NOT EXISTS {idx_name} ON api_items({col_name})"
+            )
         self._connection.commit()
 
-    def refresh_fts_index(self):
-        """FTS 인덱스를 수동으로 재생성"""
-        cur = self._connection.cursor()
-        cur.execute("DROP TABLE IF EXISTS items_clean")
-        cur.execute("DROP TABLE IF EXISTS items_fts")
-        self._setup_database()
-        logging.info("FTS index manually refreshed with latest data.")
-
-    # --- 텍스트 정규화 (원본 구조로 복원) ---
-    def _normalize_text_internal(self, s: str) -> str:
+    def _normalize_text(self, s: str) -> str:
         if not s:
             return ""
         s = unicodedata.normalize("NFKC", s).strip()
         s = self._SIMPLE_CLEAN_RE.sub(" ", s)
         s = self._WHITESPACE_RE.sub(" ", s).strip()
 
-        tokens = self.kiwi.tokenize(s)
-        # 명사, 동사 어근 등 의미 있는 품사 위주로 남김
-        kept_tokens = [
+        tokens = [
             t.form
-            for t in tokens
+            for t in self.kiwi.tokenize(s)
             if not (
                 t.tag.startswith("J") or t.tag.startswith("E") or t.tag.startswith("S")
             )
         ]
-        return " ".join(kept_tokens)
+        return " ".join(tokens)
 
-    def _normalize_text(self, s: str) -> str:
-        return self._normalize_text_internal(s)
+    def _extract_hierarchical_keywords(self, query: str) -> HierarchicalKeywords:
+        """LLM으로 계층별 키워드 추출"""
+        if not self.structured_llm:
+            logging.warning("LLM unavailable. Using query as product keyword.")
+            return HierarchicalKeywords(products=[self._normalize_text(query)])
 
-    # --- LLM 키워드 추출 ---
-    def _extract_product_names(self, query: str) -> List[str]:
-        """LLM을 호출하여 쿼리에서 품목 키워드 리스트를 추출 (실패 시 정규화된 쿼리 전체를 키워드로 사용)"""
-        if self.structured_llm is None:
-            logging.warning("LLM unavailable. Falling back to normalized query.")
-            return [self._normalize_text(query)]
-
-        chain = self.prompt | self.structured_llm
         try:
-            result: Keywords = chain.invoke({"query": query})
-            keywords = result.keywords or []
+            result = (self.prompt | self.structured_llm).invoke({"query": query})
+            return HierarchicalKeywords(
+                categories=[self._normalize_text(k) for k in result.categories if k],
+                products=[self._normalize_text(k) for k in result.products if k],
+                kinds=[self._normalize_text(k) for k in result.kinds if k],
+                grades=[self._normalize_text(k) for k in result.grades if k],
+            )
         except Exception as e:
-            logging.warning(f"Structured output failed: {e}; falling back.")
-            keywords = []
+            logging.warning(f"LLM extraction failed: {e}")
+            return HierarchicalKeywords(products=[self._normalize_text(query)])
 
-        # LLM 출력 결과 후처리 (길이 제한, 정규화, 중복 제거)
-        keywords = self._sanitize_keywords(keywords, max_items=10, max_len=12)
-        keywords = [self._normalize_text(k) for k in keywords if k]
-        keywords = list(dict.fromkeys(k for k in keywords if k))
+    def _search_with_hierarchy(self, keywords: HierarchicalKeywords) -> List[Dict]:
+        """계층 정보를 활용한 하이브리드 검색"""
+        cur = self._connection.cursor()
+        product_codes = set()
 
-        # LLM이 키워드를 반환하지 못한 경우, 사용자 쿼리 자체를 검색어로 사용
-        return keywords or [self._normalize_text(query)]
+        # 1단계: 품목 검색
+        if keywords.products:
+            product_codes = self._search_by_keywords(keywords.products, "product", cur)
+            logging.info(f"품목 키워드로 검색된 코드: {product_codes}")
 
-    @staticmethod
-    def _sanitize_keywords(xs: List[str], max_items=10, max_len=12) -> List[str]:
-        """LLM이 생성한 키워드 리스트를 안전하게 정제"""
-        out = []
-        for x in xs:
-            s = (x or "").strip()
-            if s:
-                out.append(s[:max_len])
-            if len(out) >= max_items:
-                break
-        return list(dict.fromkeys(out))
+        # 2단계: 부류로 필터링
+        if keywords.categories:
+            category_codes = self._search_by_keywords(
+                keywords.categories, "category", cur
+            )
+            logging.info(f"부류 코드: {category_codes}")
 
-    # --- FTS5 DB 검색 ---
-    def _search_products(self, keywords: List[str]) -> list:
-        """키워드 리스트를 사용하여 FTS5 DB에서 상품을 검색 (FTS 실패 시 LIKE 검색으로 대체)"""
-        if not keywords:
+            if product_codes:
+                product_codes = self._filter_by_codes(
+                    product_codes, category_codes, "category", cur
+                )
+                logging.info(f"부류 필터링 후: {product_codes}")
+            else:
+                product_codes = self._get_products_by_category(category_codes, cur)
+                logging.info(f"부류로만 검색: {len(product_codes)}개")
+
+        # 품목이 없으면 기타 계층으로 검색
+        if not product_codes and not keywords.products:
+            product_codes = self._search_by_other_hierarchy(keywords, cur)
+            logging.info(f"기타 계층으로 검색: {len(product_codes)}개")
+
+        if not product_codes:
+            logging.warning("검색된 품목 코드가 없습니다.")
             return []
 
+        # 3단계: 전체 계층 정보 조회
         results = []
-        seen_codes = set()
-        cur = self._connection.cursor()
+        for product_code in product_codes:
+            items = self._get_full_hierarchy(product_code, keywords, cur)
+            results.extend(items)
+            logging.info(f"품목 {product_code}: {len(items)}개 항목")
+
+        return results
+
+    def _search_by_keywords(
+        self, keywords: List[str], search_type: str, cur: sqlite3.Cursor
+    ) -> Set[str]:
+        """통합 키워드 검색 (품목/부류)"""
+        codes = set()
+
+        if search_type == "product":
+            code_col, name_col = "product_code", "product_name"
+        else:  # category
+            code_col, name_col = "category_code", "category_name"
 
         for keyword in keywords:
-            q = keyword
-            if not q:
+            if not keyword:
                 continue
 
-            try:
-                match_rows = cur.execute(
-                    """
-                    SELECT t1.product_code, t1.product_name
-                    FROM items_clean AS t1
-                    JOIN (
-                        SELECT rowid FROM items_fts WHERE tokenized_name MATCH ?
-                        UNION
-                        SELECT rowid FROM items_fts WHERE product_name MATCH ?
-                    ) AS t2 ON t1.rowid = t2.rowid
-                    ORDER BY 
-                        CASE WHEN t1.product_name LIKE ? || '%' THEN 0 ELSE 1 END,
-                        length(t1.product_name)
-                    LIMIT 10
+            # FTS5 검색 (품목만)
+            if search_type == "product":
+                try:
+                    codes.update(
+                        row[code_col]
+                        for row in cur.execute(
+                            """
+                        SELECT DISTINCT t1.product_code
+                        FROM items_clean AS t1
+                        JOIN items_fts AS t2 ON t1.rowid = t2.rowid
+                        WHERE t2.tokenized_name MATCH ? OR t2.product_name MATCH ?
+                        LIMIT 50
                     """,
-                    (q, q, q),
-                ).fetchall()
-                search_method = "fts5_match"
-            except sqlite3.OperationalError as e:
-                logging.warning(f"FTS5 MATCH failed, falling back to LIKE: {e}")
-                match_rows = cur.execute(
-                    """
-                    SELECT product_code, product_name
-                    FROM items_clean
-                    WHERE tokenized_name LIKE '%' || ? || '%'
-                       OR product_name LIKE '%' || ? || '%'
-                    ORDER BY 
-                        CASE WHEN product_name LIKE ? || '%' THEN 0 ELSE 1 END,
-                        length(product_name)
-                    LIMIT 10
-                    """,
-                    (q, q, q),
-                ).fetchall()
-                search_method = "like_fallback"
-
-            for row in match_rows:
-                code = row["product_code"]
-                if code not in seen_codes:
-                    results.append(
-                        {
-                            "code": code,
-                            "name": row["product_name"],
-                            "method": search_method,
-                            "matched_keyword": keyword,
-                        }
+                            (keyword, keyword),
+                        ).fetchall()
                     )
-                    seen_codes.add(code)
+                except sqlite3.OperationalError:
+                    pass
+
+            # 직접 검색
+            codes.update(
+                row[code_col]
+                for row in cur.execute(
+                    f"""
+                SELECT DISTINCT {code_col}
+                FROM api_items
+                WHERE {name_col} LIKE '%' || ? || '%'
+                LIMIT 50
+            """,
+                    (keyword,),
+                ).fetchall()
+            )
+
+        return codes
+
+    def _filter_by_codes(
+        self,
+        product_codes: Set[str],
+        filter_codes: Set[str],
+        filter_type: str,
+        cur: sqlite3.Cursor,
+    ) -> Set[str]:
+        """코드로 필터링"""
+        if not product_codes or not filter_codes:
+            return product_codes
+
+        filter_col = f"{filter_type}_code"
+        placeholders = ",".join("?" * len(product_codes))
+        filter_placeholders = ",".join("?" * len(filter_codes))
+
+        return {
+            row["product_code"]
+            for row in cur.execute(
+                f"""
+            SELECT DISTINCT product_code
+            FROM api_items
+            WHERE product_code IN ({placeholders})
+              AND {filter_col} IN ({filter_placeholders})
+        """,
+                list(product_codes) + list(filter_codes),
+            ).fetchall()
+        }
+
+    def _get_products_by_category(
+        self, category_codes: Set[str], cur: sqlite3.Cursor
+    ) -> Set[str]:
+        """부류 코드로 품목 코드 조회"""
+        if not category_codes:
+            return set()
+
+        placeholders = ",".join("?" * len(category_codes))
+        return {
+            row["product_code"]
+            for row in cur.execute(
+                f"""
+            SELECT DISTINCT product_code
+            FROM api_items
+            WHERE category_code IN ({placeholders})
+            LIMIT 100
+        """,
+                list(category_codes),
+            ).fetchall()
+        }
+
+    def _search_by_other_hierarchy(
+        self, keywords: HierarchicalKeywords, cur: sqlite3.Cursor
+    ) -> Set[str]:
+        """품목 외 계층(품종/등급)으로 검색"""
+        conditions, params = [], []
+
+        if keywords.kinds:
+            conditions.append(
+                "("
+                + " OR ".join(["kind_name LIKE '%' || ? || '%'"] * len(keywords.kinds))
+                + ")"
+            )
+            params.extend(keywords.kinds)
+
+        if keywords.grades:
+            conditions.append(
+                "("
+                + " OR ".join(["rank_name LIKE '%' || ? || '%'"] * len(keywords.grades))
+                + ")"
+            )
+            params.extend(keywords.grades)
+
+        if not conditions:
+            return set()
+
+        return {
+            row["product_code"]
+            for row in cur.execute(
+                f"""
+            SELECT DISTINCT product_code
+            FROM api_items
+            WHERE {" OR ".join(conditions)}
+            LIMIT 100
+        """,
+                params,
+            ).fetchall()
+        }
+
+    def _get_full_hierarchy(
+        self, product_code: str, keywords: HierarchicalKeywords, cur: sqlite3.Cursor
+    ) -> List[Dict]:
+        """품목 코드로 전체 계층 정보 조회"""
+        is_livestock = cur.execute(
+            """
+            SELECT category_code FROM api_items
+            WHERE product_code = ?
+            LIMIT 1
+        """,
+            (product_code,),
+        ).fetchone()
+
+        is_livestock = (
+            is_livestock
+            and is_livestock["category_code"] == self.LIVESTOCK_CATEGORY_CODE
+        )
+
+        return (
+            self._get_livestock_hierarchy(product_code, keywords, cur)
+            if is_livestock
+            else self._get_general_hierarchy(product_code, keywords, cur)
+        )
+
+    def _build_hierarchy_query(
+        self, product_code: str, keywords: HierarchicalKeywords, is_livestock: bool
+    ) -> tuple:
+        """계층 쿼리 빌드 (통합)"""
+        if is_livestock:
+            base_query = """
+                SELECT DISTINCT
+                    category_code, category_name, product_code, product_name,
+                    livestock_kind_code, kind_name,
+                    p_periodProductList, p_periodProductName
+                FROM api_items
+                WHERE product_code = ? AND category_code = ?
+            """
+            params = [product_code, self.LIVESTOCK_CATEGORY_CODE]
+        else:
+            base_query = """
+                SELECT DISTINCT
+                    category_code, category_name, product_code, product_name,
+                    kind_code, kind_name,
+                    productrank_code, graderank_code, rank_name
+                FROM api_items
+                WHERE product_code = ? AND category_code != ?
+            """
+            params = [product_code, self.LIVESTOCK_CATEGORY_CODE]
+
+        # 품종 필터링
+        if keywords.kinds:
+            base_query += f" AND ({' OR '.join(['kind_name LIKE ? || ? || ?'] * len(keywords.kinds))})"
+            params.extend(["%", k, "%"] for k in keywords.kinds)
+            params = [
+                item
+                for sublist in params
+                for item in (sublist if isinstance(sublist, list) else [sublist])
+            ]
+
+        # 등급 필터링
+        if keywords.grades:
+            if is_livestock:
+                grade_patterns = []
+                for grade in keywords.grades:
+                    grade_patterns.extend(
+                        [
+                            "p_periodProductName LIKE '%' || ? || '%'",
+                            "p_periodProductList LIKE '%' || ? || '%'",
+                        ]
+                    )
+                    params.extend([grade, grade])
+
+                    # 숫자 추출
+                    for digit in self._DIGIT_RE.findall(grade):
+                        grade_patterns.append("p_periodProductList = ?")
+                        params.append(digit)
+
+                if grade_patterns:
+                    base_query += f" AND ({' OR '.join(grade_patterns)})"
+            else:
+                base_query += f" AND ({' OR '.join(['rank_name LIKE ? || ? || ?', 'graderank_code LIKE ? || ? || ?'] * len(keywords.grades))})"
+                for grade in keywords.grades:
+                    params.extend(["%", grade, "%", "%", grade, "%"])
+
+        return base_query, params
+
+    def _get_general_hierarchy(
+        self, product_code: str, keywords: HierarchicalKeywords, cur: sqlite3.Cursor
+    ) -> List[Dict]:
+        """농수산물 계층 정보 조회"""
+        query, params = self._build_hierarchy_query(product_code, keywords, False)
+        rows = cur.execute(query, params).fetchall()
+        logging.info(f"농수산물 검색 결과: {len(rows)}행")
+
+        return [
+            {
+                "category_code": row["category_code"],
+                "category_name": row["category_name"],
+                "product_code": row["product_code"],
+                "product_name": row["product_name"],
+                "item_type": "general",
+                **(
+                    {"kind_code": row["kind_code"], "kind_name": row["kind_name"]}
+                    if row["kind_code"]
+                    else {}
+                ),
+                **(
+                    {
+                        "grade": {
+                            "productrank_code": row["productrank_code"],
+                            "graderank_code": row["graderank_code"],
+                            "rank_name": row["rank_name"],
+                        }
+                    }
+                    if row["productrank_code"]
+                    else {}
+                ),
+            }
+            for row in rows
+        ]
+
+    def _get_livestock_hierarchy(
+        self, product_code: str, keywords: HierarchicalKeywords, cur: sqlite3.Cursor
+    ) -> List[Dict]:
+        """축산물 계층 정보 조회"""
+        query, params = self._build_hierarchy_query(product_code, keywords, True)
+        rows = cur.execute(query, params).fetchall()
+        logging.info(f"축산물 검색 결과: {len(rows)}행")
+
+        return [
+            {
+                "category_code": row["category_code"],
+                "category_name": row["category_name"],
+                "product_code": row["product_code"],
+                "product_name": row["product_name"],
+                "item_type": "livestock",
+                **(
+                    {
+                        "kind_code": row["livestock_kind_code"],
+                        "kind_name": row["kind_name"],
+                    }
+                    if row["livestock_kind_code"]
+                    else {}
+                ),
+                **(
+                    {
+                        "grade": {
+                            "period_product_list": row["p_periodProductList"],
+                            "period_product_name": row["p_periodProductName"],
+                        }
+                    }
+                    if row["p_periodProductList"]
+                    else {}
+                ),
+            }
+            for row in rows
+        ]
+
+    def _organize_hierarchy(self, raw_results: List[Dict]) -> List[Dict]:
+        """검색 결과를 계층 구조로 재구성"""
+        results = []
+
+        for item in raw_results:
+            result_item = {
+                "category": {
+                    "category_code": item["category_code"],
+                    "category_name": item["category_name"],
+                },
+                "product": {
+                    "product_code": item["product_code"],
+                    "product_name": item["product_name"],
+                },
+            }
+
+            # 품종 정보
+            if "kind_code" in item and item["kind_code"]:
+                result_item["kind"] = {
+                    "kind_code": item["kind_code"],
+                    "kind_name": item["kind_name"],
+                }
+
+            # 등급 정보
+            if "grade" in item:
+                is_livestock = item["item_type"] == "livestock"
+                if is_livestock:
+                    result_item["grade"] = {
+                        "code": item["grade"]["period_product_list"],
+                        "name": item["grade"]["period_product_name"],
+                    }
+                else:
+                    result_item["grade"] = {
+                        "productrank_code": item["grade"]["productrank_code"],
+                        "graderank_code": item["grade"]["graderank_code"],
+                        "name": item["grade"]["rank_name"],
+                    }
+
+            results.append(result_item)
+
         return results
 
 
 if __name__ == "__main__":
     DB_PATH = os.getenv("DB_PATH", "kamis_api_list.db")
-    QUERY = os.getenv("QUERY", "마늘 가격을 알려줘.")
+    QUERY = os.getenv("QUERY", "최근 고추의 가격을 알려줘.")
 
     try:
-        searcher = LLMProductSearcher(DB_PATH)
-        print(f"Original Query: {QUERY}\n")
-        json_output = searcher.get_name_code_pairs_json(QUERY)
-        print("--- Result (JSON) ---")
-        print(json_output)
+        searcher = LLMHierarchicalSearcher(DB_PATH)
+        print(f"Query: {QUERY}\n")
+        print("=== 계층적 검색 결과 ===")
+        print(searcher.get_full_hierarchy_json(QUERY))
     except FileNotFoundError as e:
         logging.error(e)
     except Exception as e:
