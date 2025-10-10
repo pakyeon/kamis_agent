@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 import os, time, requests
+import tempfile
+import shutil
 import sqlite3
 import pandas as pd
 from typing import List, Dict, Optional, Iterable
@@ -17,6 +19,8 @@ DOWNLOAD_HEADERS = {
     "User-Agent": "Mozilla/5.0",
     "Referer": "https://www.kamis.or.kr/customer/board/board.do",
 }
+
+DB_MAX_AGE_HOURS = 24  # 로컬 SQLite DB가 이 값(시간)보다 오래되면 갱신
 
 # 축산물 부류 코드 상수
 LIVESTOCK_CATEGORY_CODE = "500"
@@ -123,6 +127,40 @@ def read_sheet_with_header(
             df[col] = pd.NA
     df = df[wanted_cols]
     return _drop_all_empty_rows(df)
+
+
+def download_to_path(url: str, dest_path: str, headers: Dict[str, str] | None = None):
+    h = headers or {}
+    r = requests.get(url, headers=h, timeout=60)
+    r.raise_for_status()
+    os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+    with open(dest_path, "wb") as f:
+        f.write(r.content)
+    print(f"[download] Saved (temp): {dest_path}")
+
+
+def should_update_db(sqlite_path: str, max_age_hours: int) -> bool:
+    """
+    로컬 SQLite DB 최신성(TTL) 기준으로 갱신 필요 여부 판단.
+    - DB가 없으면 True
+    - DB의 mtime이 max_age_hours를 넘으면 True
+    - 그 외 False
+    """
+    if not os.path.exists(sqlite_path):
+        print("[update] DB가 존재하지 않습니다 → 갱신합니다.")
+        return True
+
+    db_mtime = os.path.getmtime(sqlite_path)
+    age_hours = (time.time() - db_mtime) / 3600.0
+
+    if age_hours > max_age_hours:
+        print(f"[update] DB가 {age_hours:.1f}h 경과(임계 {max_age_hours}h) → 갱신.")
+        return True
+
+    print(
+        f"[update] DB가 최신입니다({age_hours:.1f}h 경과 ≤ {max_age_hours}h). 재생성 스킵."
+    )
+    return False
 
 
 # ============ 시트별 데이터 추출 ============
@@ -251,7 +289,7 @@ def merge_hierarchically(path: str) -> pd.DataFrame:
     df_livestock = extract_livestock(path)
     df_sanmul = extract_sanmul(path)
 
-    # ★ 데이터 타입 통일 (조인 전 필수!)
+    # 데이터 타입 통일
     df_buryu = normalize_data_types(df_buryu)
     df_pummok = normalize_data_types(df_pummok)
     df_pumjong = normalize_data_types(df_pumjong)
@@ -353,7 +391,7 @@ def merge_hierarchically(path: str) -> pd.DataFrame:
         elif not non_livestock_with_rank.empty:
             result = non_livestock_with_rank
         else:
-            result = result  # 원본 유지
+            result = result
 
         print(f"등급 조인 후: {len(result)}행 (축산물은 고유 등급 체계 사용)")
 
@@ -392,57 +430,102 @@ def process_kamis_data(
     table_name: str = SQLITE_TABLE,
     auto_download: bool = True,
     return_dataframe: bool = False,
-) -> Optional[pd.DataFrame]:
+    db_max_age_hours: int | None = None,
+    download_url: str | None = None,
+    download_headers: dict | None = None,
+):
     """
-    KAMIS 데이터 처리 메인 함수
-
-    Args:
-        excel_path: 엑셀 파일 경로 (기본값: EXCEL_PATH)
-        sqlite_path: SQLite DB 경로 (기본값: SQLITE_PATH)
-        table_name: 테이블명 (기본값: SQLITE_TABLE)
-        auto_download: 자동 다운로드 여부 (기본값: True)
-        return_dataframe: DataFrame 반환 여부 (기본값: False)
-
-    Returns:
-        return_dataframe=True인 경우 처리된 DataFrame 반환, 아니면 None
-
-    Examples:
-        # 기본 사용 (DB만 생성)
-        >>> process_kamis_data()
-
-        # DataFrame 받아서 추가 처리
-        >>> df = process_kamis_data(return_dataframe=True)
-        >>> filtered = df[df['category_name'] == '과일류']
-
-        # 커스텀 경로
-        >>> process_kamis_data(
-        ...     excel_path="custom.xlsx",
-        ...     sqlite_path="custom.db",
-        ...     auto_download=False
-        ... )
+    KAMIS 데이터 처리 메인 함수 (로컬 SQLite DB 최신성 기반 갱신)
     """
+    import os
+    import time
+    import tempfile
+
+    # --- 내부 헬퍼: 로컬 DB TTL 기반 업데이트 필요 여부 판단 ---
+    def _should_update_db(_sqlite_path: str, _max_age_hours: int) -> bool:
+        if not os.path.exists(_sqlite_path):
+            print("[update] DB가 존재하지 않습니다 → 갱신합니다.")
+            return True
+        db_mtime = os.path.getmtime(_sqlite_path)
+        age_hours = (time.time() - db_mtime) / 3600.0
+        if age_hours > _max_age_hours:
+            print(
+                f"[update] DB가 {age_hours:.1f}h 경과(임계 {_max_age_hours}h) → 갱신."
+            )
+            return True
+        print(
+            f"[update] DB가 최신입니다({age_hours:.1f}h 경과 ≤ {_max_age_hours}h). 재생성 스킵."
+        )
+        return False
+
+    # --- 파라미터/전역 기본값 해석 ---
+    # TTL
+    if db_max_age_hours is None:
+        try:
+            # 전역 상수가 있으면 사용
+            _db_ttl = DB_MAX_AGE_HOURS
+        except NameError:
+            _db_ttl = 24  # 기본 24시간
+    else:
+        _db_ttl = int(db_max_age_hours)
+
+    # 다운로드 URL/헤더
+    if download_url is None:
+        download_url = DOWNLOAD_URL
+    if download_headers is None:
+        download_headers = DOWNLOAD_HEADERS
+
     print("=== 관계형 병합 방식으로 데이터 처리 시작 ===")
 
-    if auto_download:
-        download_if_needed(excel_path, DOWNLOAD_URL, DOWNLOAD_HEADERS)
+    temp_dir = None
+    excel_path_in_use = excel_path
 
-    # 1. 관계형 조인으로 데이터 병합
-    merged_data = merge_hierarchically(excel_path)
+    try:
+        if auto_download:
+            needs_update = _should_update_db(sqlite_path, _db_ttl)
+            if not needs_update:
+                # 최신이면 아무 것도 하지 않음
+                return None
 
-    # 2. 최종 스키마로 매핑
-    final_data = map_to_final_schema(merged_data)
+            print("[update] 로컬 DB TTL 초과 → 갱신합니다.")
+            # 임시 디렉터리 생성 및 다운로드
+            temp_dir = tempfile.TemporaryDirectory(prefix="kamis_")
+            excel_path_in_use = os.path.join(temp_dir.name, "kamis_codes.xlsx")
 
-    # 3. SQLite에 저장
-    load_to_sqlite(final_data, sqlite_path, table_name)
+            # 심플 다운로드 (전역/외부의 download_to_path 함수를 사용)
+            download_to_path(download_url, excel_path_in_use, download_headers)
 
-    print(f"\n[완료] SQLite 적재 완료!")
-    print(f"- 파일: {sqlite_path}")
-    print(f"- 테이블: {table_name}")
-    print(f"- 최종 행수: {len(final_data)}")
+        else:
+            # 수동 경로 모드: 경로 검증
+            if not os.path.exists(excel_path_in_use):
+                raise FileNotFoundError(f"엑셀 파일이 없습니다: {excel_path_in_use}")
 
-    if return_dataframe:
-        return final_data
-    return None
+        # 1) 관계형 병합
+        merged_data = merge_hierarchically(excel_path_in_use)
+
+        # 2) 최종 스키마 매핑
+        final_data = map_to_final_schema(merged_data)
+
+        # 3) SQLite 적재
+        load_to_sqlite(final_data, sqlite_path, table_name)
+
+        print(f"\n[완료] SQLite 적재 완료!")
+        print(f"- 파일: {sqlite_path}")
+        print(f"- 테이블: {table_name}")
+        print(f"- 최종 행수: {len(final_data)}")
+
+        if return_dataframe:
+            return final_data
+        return None
+
+    finally:
+        # auto_download로 받은 임시 파일/디렉터리 정리
+        if temp_dir is not None:
+            try:
+                temp_dir.cleanup()
+                print("[cleanup] 임시 파일/디렉터리 삭제 완료.")
+            except Exception as e:
+                print(f"[cleanup][warn] 임시 파일 삭제 중 경고: {e}")
 
 
 # ============ SQLite 관련 ============
