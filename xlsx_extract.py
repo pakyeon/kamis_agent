@@ -277,9 +277,55 @@ def normalize_data_types(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-# ============ 관계형 병합 로직 ============
+# ============ Lookup 기반 병합 헬퍼 함수 ============
+def merge_with_lookup(
+    data_df: pd.DataFrame,
+    lookup_df: pd.DataFrame,
+    merge_keys: list,
+    lookup_cols: dict,
+) -> pd.DataFrame:
+    """
+    데이터 손실 없이 lookup 정보를 병합하는 함수
+
+    Args:
+        data_df: 메인 데이터 프레임
+        lookup_df: 조회용 데이터 프레임
+        merge_keys: 조인 키 리스트
+        lookup_cols: {원본컬럼명: 대상컬럼명} 매핑
+    """
+    result = data_df.copy()
+
+    # lookup 데이터와 left join
+    merged = result.merge(
+        lookup_df[merge_keys + list(lookup_cols.keys())],
+        on=merge_keys,
+        how="left",
+        suffixes=("", "_lookup"),
+    )
+
+    # lookup 값으로 빈 값 채우기
+    for src_col, dst_col in lookup_cols.items():
+        lookup_col = (
+            f"{src_col}_lookup" if f"{src_col}_lookup" in merged.columns else src_col
+        )
+        if dst_col not in merged.columns:
+            merged[dst_col] = merged[lookup_col]
+        else:
+            merged[dst_col] = merged[dst_col].fillna(merged[lookup_col])
+
+    # lookup 접미사 컬럼 제거
+    cols_to_drop = [c for c in merged.columns if c.endswith("_lookup")]
+    merged = merged.drop(columns=cols_to_drop)
+
+    return merged
+
+
+# ============ 관계형 병합 로직 (개선 버전) ============
 def merge_hierarchically(path: str) -> pd.DataFrame:
-    """계층구조를 따라 관계형 조인으로 데이터 병합"""
+    """
+    개선된 병합 로직: 데이터 손실 최소화
+    각 시트를 독립적으로 처리한 후 통합
+    """
 
     # 1. 각 시트별 데이터 추출
     df_buryu = extract_buryu(path)
@@ -300,102 +346,169 @@ def merge_hierarchically(path: str) -> pd.DataFrame:
     print(f"품목 시트: {len(df_pummok)}행")
     print(f"품종 시트: {len(df_pumjong)}행")
     print(f"등급 시트: {len(df_rank)}행")
-    print(
-        f"축산물 시트: {len(df_livestock)}행 (부류코드='500', 부류명='축산물' 자동 추가)"
-    )
+    print(f"축산물 시트: {len(df_livestock)}행")
     print(f"산물 시트: {len(df_sanmul)}행")
 
-    # 2. 기본 골격: 부류 → 품목 조인
-    result = df_buryu.merge(
-        df_pummok, on="부류코드", how="outer", suffixes=("", "_pummok")
+    # 2. 일반 품목 데이터 처리 (산물 시트 기반)
+    print("\n[일반 품목 처리]")
+    general_items = df_sanmul.copy()
+    print(f"산물 시트 원본: {len(general_items)}행")
+
+    # 부류명 lookup
+    general_items = merge_with_lookup(
+        general_items, df_buryu, ["부류코드"], {"부류명": "부류명"}
     )
 
-    # 부류명 병합 (부류 시트 우선)
-    result["부류명"] = result["부류명"].fillna(result.get("부류명_pummok", pd.NA))
-    if "부류명_pummok" in result.columns:
-        result = result.drop("부류명_pummok", axis=1)
-
-    print(f"부류+품목 조인 후: {len(result)}행")
-
-    # 3. 품종 데이터 조인 (품목코드 기준)
-    result = result.merge(
-        df_pumjong, on="품목코드", how="outer", suffixes=("", "_pumjong")
+    # 품목명 lookup
+    general_items = merge_with_lookup(
+        general_items,
+        df_pummok[["품목코드", "품목명"]].drop_duplicates(),
+        ["품목코드"],
+        {"품목명": "품목명"},
     )
 
-    # 품목명 병합 (기존 데이터 우선)
-    result = _merge_duplicate_columns(result, ["품목명"], "_pumjong")
-
-    print(f"품종 조인 후: {len(result)}행")
-
-    # 4. 축산물 데이터 조인 (부류코드='500' 기준)
-    livestock_merge_cols = ["부류코드", "품목코드"]
-    result = result.merge(
-        df_livestock, on=livestock_merge_cols, how="outer", suffixes=("", "_livestock")
+    # 품종명 lookup
+    general_items = merge_with_lookup(
+        general_items,
+        df_pumjong[["품목코드", "품종코드", "품종명"]].drop_duplicates(),
+        ["품목코드", "품종코드"],
+        {"품종명": "품종명"},
     )
 
-    # 중복 컬럼 병합 - 축산물 고유 등급 정보는 별도 처리
-    result = _merge_duplicate_columns(
-        result, ["부류명", "품목명", "품종명"], "_livestock"
-    )
-
-    print(f"축산물 조인 후: {len(result)}행")
-
-    # 5. 산물 데이터 조인
-    sanmul_merge_cols = ["부류코드", "품목코드", "품종코드"]
-    result = result.merge(
-        df_sanmul, on=sanmul_merge_cols, how="outer", suffixes=("", "_sanmul")
-    )
-
-    # 중복 컬럼 병합
-    result = _merge_duplicate_columns(
-        result, ["부류명", "품목명", "품종명", "등급코드명"], "_sanmul"
-    )
-
-    print(f"산물 조인 후: {len(result)}행")
-
-    # 6. 등급 데이터 조인
+    # 등급 정보 lookup
     if not df_rank.empty:
-        non_livestock_mask = result["부류코드"] != LIVESTOCK_CATEGORY_CODE
-        livestock_data = result[~non_livestock_mask].copy()
-        non_livestock_data = result[non_livestock_mask].copy()
+        general_items = merge_with_lookup(
+            general_items,
+            df_rank,
+            ["등급코드(p_productrankcode)"],
+            {
+                "등급코드(p_graderank)": "등급코드(p_graderank)",
+                "등급코드명": "등급코드명",
+            },
+        )
 
-        if not non_livestock_data.empty:
-            # cross join 전에 충돌할 수 있는 컬럼들을 미리 삭제합니다.
-            # 이렇게 하면 merge 후에 _x, _y 같은 접미사가 붙는 것을 방지할 수 있습니다.
-            cols_to_drop = [
-                col for col in df_rank.columns if col in non_livestock_data.columns
-            ]
-            non_livestock_data_cleaned = non_livestock_data.drop(columns=cols_to_drop)
+    # 축산물 컬럼 추가 (빈 값)
+    general_items["축산_품종코드"] = pd.NA
+    general_items["등급코드(periodProductList)"] = pd.NA
+    general_items["등급코드(periodProductName)"] = pd.NA
 
-            # 정리된 데이터프레임으로 cross join을 수행합니다.
-            non_livestock_with_rank = non_livestock_data_cleaned.merge(
-                df_rank, how="cross"
-            )
-        else:
-            non_livestock_with_rank = pd.DataFrame()  # 비어있는 경우를 위한 처리
+    print(f"일반 품목 처리 후: {len(general_items)}행")
 
-        # 축산물 데이터와 비축산물+등급 데이터 합치기
-        # 축산물 데이터에는 일반 등급 컬럼을 빈 값으로 추가
-        if not livestock_data.empty:
-            for col in df_rank.columns:
-                if col not in livestock_data.columns:
-                    livestock_data[col] = pd.NA
+    # 3. 축산물 데이터 처리
+    print("\n[축산물 처리]")
+    livestock_items = df_livestock.copy()
+    print(f"축산물 시트 원본: {len(livestock_items)}행")
 
-        # 최종 결합
-        if not livestock_data.empty and not non_livestock_with_rank.empty:
-            result = pd.concat(
-                [livestock_data, non_livestock_with_rank], ignore_index=True
-            )
-        elif not livestock_data.empty:
-            result = livestock_data
-        elif not non_livestock_with_rank.empty:
-            result = non_livestock_with_rank
-        else:
-            result = result
+    # 품목명 lookup
+    livestock_items = merge_with_lookup(
+        livestock_items,
+        df_pummok[["품목코드", "품목명"]].drop_duplicates(),
+        ["품목코드"],
+        {"품목명": "품목명"},
+    )
 
-        print(f"등급 조인 후: {len(result)}행 (축산물은 고유 등급 체계 사용)")
+    # 일반 등급 컬럼 추가 (빈 값)
+    livestock_items["품종코드"] = pd.NA
+    livestock_items["등급코드(p_productrankcode)"] = pd.NA
+    livestock_items["등급코드(p_graderank)"] = pd.NA
+    livestock_items["등급코드명"] = pd.NA
 
-    # 7. 데이터 정제
+    print(f"축산물 처리 후: {len(livestock_items)}행")
+
+    # 4. 산물과 축산물 외의 기본 품목/품종 데이터 처리
+    print("\n[기본 품목/품종 처리]")
+
+    # 품목 기반 데이터 생성
+    base_items = df_pummok.copy()
+
+    # 부류명 lookup
+    base_items = merge_with_lookup(
+        base_items, df_buryu, ["부류코드"], {"부류명": "부류명"}
+    )
+
+    # 품종이 있는 품목의 경우 품종별로 확장
+    items_with_kind = base_items.merge(
+        df_pumjong[["품목코드", "품종코드", "품종명"]], on="품목코드", how="inner"
+    )
+
+    # 품종이 없는 품목
+    items_without_kind = base_items[
+        ~base_items["품목코드"].isin(items_with_kind["품목코드"])
+    ].copy()
+    items_without_kind["품종코드"] = pd.NA
+    items_without_kind["품종명"] = pd.NA
+
+    # 합치기
+    base_items = pd.concat([items_with_kind, items_without_kind], ignore_index=True)
+
+    # 축산물과 산물에 이미 포함된 조합 제거
+    sanmul_combos = set(
+        df_sanmul[["부류코드", "품목코드", "품종코드"]]
+        .dropna(subset=["품목코드"])
+        .apply(
+            lambda x: f"{x['부류코드']}|{x['품목코드']}|{str(x['품종코드'])}", axis=1
+        )
+    )
+    livestock_combos = set(
+        df_livestock[["부류코드", "품목코드"]].apply(
+            lambda x: f"{x['부류코드']}|{x['품목코드']}|", axis=1
+        )
+    )
+
+    base_items["_combo"] = base_items.apply(
+        lambda x: f"{x['부류코드']}|{x['품목코드']}|{str(x['품종코드'])}", axis=1
+    )
+    base_items = base_items[
+        ~base_items["_combo"].isin(sanmul_combos)
+        & ~base_items["_combo"].isin(livestock_combos)
+    ].drop("_combo", axis=1)
+
+    # 빈 컬럼 추가
+    base_items["축산_품종코드"] = pd.NA
+    base_items["등급코드(p_productrankcode)"] = pd.NA
+    base_items["등급코드(p_graderank)"] = pd.NA
+    base_items["등급코드명"] = pd.NA
+    base_items["등급코드(periodProductList)"] = pd.NA
+    base_items["등급코드(periodProductName)"] = pd.NA
+
+    print(f"기본 품목/품종 데이터: {len(base_items)}행")
+
+    # 5. 모든 데이터 통합
+    print("\n[최종 통합]")
+
+    # 컬럼 순서 통일
+    final_columns = [
+        "부류코드",
+        "부류명",
+        "품목코드",
+        "품목명",
+        "품종코드",
+        "품종명",
+        "축산_품종코드",
+        "등급코드(p_productrankcode)",
+        "등급코드(p_graderank)",
+        "등급코드명",
+        "등급코드(periodProductList)",
+        "등급코드(periodProductName)",
+    ]
+
+    # 각 데이터프레임의 컬럼 통일
+    for df in [general_items, livestock_items, base_items]:
+        for col in final_columns:
+            if col not in df.columns:
+                df[col] = pd.NA
+
+    # 순서대로 선택
+    general_items = general_items[final_columns]
+    livestock_items = livestock_items[final_columns]
+    base_items = base_items[final_columns]
+
+    # 통합
+    result = pd.concat([general_items, livestock_items, base_items], ignore_index=True)
+
+    print(f"통합 후: {len(result)}행")
+
+    # 6. 데이터 정제
     result = result.map(_strip_str).replace("", pd.NA)
     result = result.drop_duplicates().reset_index(drop=True)
 
@@ -475,7 +588,7 @@ def process_kamis_data(
     if download_headers is None:
         download_headers = DOWNLOAD_HEADERS
 
-    print("=== 관계형 병합 방식으로 데이터 처리 시작 ===")
+    print("=== 개선된 병합 방식으로 데이터 처리 시작 ===")
 
     temp_dir = None
     excel_path_in_use = excel_path
