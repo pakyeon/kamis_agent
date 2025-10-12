@@ -4,7 +4,7 @@
 KAMIS 멀티-툴 LLM 에이전트 (CLI)
 - LangGraph 중심, LangChain 툴 기반
 - 17개 Open API 각각을 Tool로 래핑
-- 품목명→코드 매핑: productInfo 캐시 + search_item 툴 제공
+- 품목명→코드 매핑: productInfo 캐싱 + search_item 툴 제공
 - 출력 포맷: ReAct 로그(간단) + 최종답변
 """
 
@@ -27,7 +27,7 @@ from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolNode
 
 # 품목 검색 모듈
-from llm_product_searcher import LLMProductSearcher
+from llm_product_searcher import LLMHierarchicalSearcher
 
 load_dotenv()
 
@@ -97,7 +97,7 @@ class KamisClient:
 class CodeBook:
     def __init__(self, client: KamisClient):
         self.client = client
-        self.cache = None  # 전체 코드표 캐시
+        self.cache = None  # 전체 코드표 캐싱
 
     def _fetch(self):
         data = self.client.call("productInfo", {})
@@ -258,7 +258,7 @@ API_DEFS: Dict[str, Dict[str, Any]] = {
             "p_convert_kg_yn": (str, "kg 환산 Y/N"),
         },
     },
-    # 5. (구) 친환경 (’05~’20.3.) - 기간
+    # 5. (구) 친환경 ('05~'20.3.) - 기간
     "old_eco_period": {
         "action": "periodNaturePriceList",
         "fields": {
@@ -315,7 +315,7 @@ API_DEFS: Dict[str, Dict[str, Any]] = {
             "p_countrycode": (str, "시군구코드"),
         },
     },
-    # 11. (구) 친환경 품목별 (’05~’20.3.)
+    # 11. (구) 친환경 품목별 ('05~'20.3.)
     "old_eco_item": {
         "action": "NaturePriceList",
         "fields": {
@@ -329,7 +329,7 @@ API_DEFS: Dict[str, Dict[str, Any]] = {
             "p_convert_kg_yn": (str, "kg 환산 Y/N"),
         },
     },
-    # 12. (신) 친환경 (’20.4~) - 기간
+    # 12. (신) 친환경 ('20.4~) - 기간
     "new_eco_period": {
         "action": "periodEcoPriceList",
         "fields": {
@@ -344,7 +344,7 @@ API_DEFS: Dict[str, Dict[str, Any]] = {
             "p_convert_kg_yn": (str, "kg 환산 Y/N"),
         },
     },
-    # 13. (신) 친환경 품목별 (’20.4~)
+    # 13. (신) 친환경 품목별 ('20.4~)
     "new_eco_item": {
         "action": "EcoPriceList",
         "fields": {
@@ -466,10 +466,10 @@ def make_structured_tool(
 
 
 # =========================
-# search_item 툴 (CodeBook 실제 활용)
+# search_item 툴 (계층적 검색 결과 → 코드 매핑)
 # =========================
 def make_search_item_tool(
-    codebook: CodeBook, searcher: Optional[LLMProductSearcher] = None
+    codebook: CodeBook, searcher: Optional[LLMHierarchicalSearcher] = None
 ) -> StructuredTool:
     class _Input(BaseModel):
         natural_query: Optional[str] = Field(None, description="자연어 질의")
@@ -487,40 +487,72 @@ def make_search_item_tool(
         if not query_text:
             return {"error": "검색어가 비어 있습니다. natural_query를 지정하세요."}
 
-        # 1) 우선 LLM+FTS5 기반 검색 시도
-        pairs = searcher.get_name_code_pairs(
-            query_text
-        )  # [{product_name, product_code}, ...]
-        cands = []
-        for p in pairs[: max(1, min(top_k, 10))]:
-            name = p.get("product_name")
-            code = p.get("product_code")
-            cands.append(
-                {
-                    "product_name": name,
-                    "product_code": code,
-                    # 하위 호환 필드(기존 파이프라인에서 기대할 수 있음)
-                    "item_name": name,
-                    "itemcode": code,
-                    "source": "llm_fts",
-                }
-            )
-        if cands:
+        if not searcher:
+            return {"error": "검색기가 초기화되지 않았습니다."}
+
+        # 계층적 검색 수행
+        try:
+            hierarchy_results = searcher.search_hierarchical(query_text)
+        except Exception as e:
+            return {"error": f"검색 중 오류 발생: {str(e)}"}
+
+        if not hierarchy_results:
             return {
-                "query": {
-                    "natural": query_text,
-                    "category_hint": category_hint,
-                },
-                "candidates": cands,
-                "note": "LLM+FTS5 기반 고급 검색 결과입니다. 필요 시 product_info로 품종/등급 코드 보완.",
+                "query": {"natural": query_text, "category_hint": category_hint},
+                "candidates": [],
+                "note": "검색 결과가 없습니다.",
             }
+
+        # 계층적 결과를 기존 포맷과 호환되도록 변환
+        cands = []
+        seen = set()  # 중복 제거용
+
+        for item in hierarchy_results[:top_k]:
+            product = item.get("product", {})
+            product_code = product.get("product_code")
+            product_name = product.get("product_name")
+
+            # 중복 체크
+            key = f"{product_code}_{product_name}"
+            if key in seen:
+                continue
+            seen.add(key)
+
+            # 기본 정보
+            cand = {
+                "product_name": product_name,
+                "product_code": product_code,
+                "item_name": product_name,  # 하위 호환
+                "itemcode": product_code,  # 하위 호환
+                "source": "llm_hierarchical",
+            }
+
+            # 추가 계층 정보 포함
+            if "category" in item:
+                cand["category"] = item["category"]
+            if "kind" in item:
+                cand["kind"] = item["kind"]
+            if "grade" in item:
+                cand["grade"] = item["grade"]
+
+            cands.append(cand)
+
+        return {
+            "query": {
+                "natural": query_text,
+                "category_hint": category_hint,
+            },
+            "candidates": cands,
+            "note": f"계층적 검색으로 {len(cands)}개 결과를 찾았습니다. 필요 시 product_info로 상세 정보 확인 가능.",
+        }
 
     return StructuredTool.from_function(
         name="search_item",
         func=_run,
         args_schema=_Input,
         description=(
-            "품목명/자연어 질의로 KAMIS 코드 후보를 검색합니다." "반환: 후보 상위 N개."
+            "품목명/자연어 질의로 KAMIS 코드 후보를 검색합니다. "
+            "계층적 구조(부류-품목-품종-등급)로 결과를 반환합니다."
         ),
     )
 
@@ -534,7 +566,7 @@ class AgentState(TypedDict):
 
 
 def make_tools(
-    client: KamisClient, codebook: CodeBook, searcher: Optional[LLMProductSearcher]
+    client: KamisClient, codebook: CodeBook, searcher: Optional[LLMHierarchicalSearcher]
 ) -> List[StructuredTool]:
     tools: List[StructuredTool] = []
     tools.append(make_search_item_tool(codebook, searcher))  # ← 검색기 주입
@@ -593,7 +625,7 @@ def build_graph(llm: ChatOpenAI, tools: List[StructuredTool]):
         return "finalize"
 
     def record_tool_results(state: AgentState):
-        """도구 실행 -> ToolNode."""
+        """도구 실행 -> ToolNode"""
         out = tool_node.invoke(state)  # {"messages": [ToolMessage, ...]}
         tool_msgs = out.get("messages", [])
         # trace에 간단한 관찰 요약 포함(가능 시)
@@ -648,7 +680,10 @@ def main():
     )
     parser.add_argument("--query", type=str, required=True, help="사용자 자연어 질의")
     parser.add_argument(
-        "--model", type=str, default="gpt-5-mini", help="OpenAI 모델 (기본: gpt-5)"
+        "--model",
+        type=str,
+        default="gpt-5-mini",
+        help="OpenAI 모델",
     )
     parser.add_argument(
         "--trace", action="store_true", help="간단 trace 로그를 stderr로 출력"
@@ -668,13 +703,21 @@ def main():
         cert_key=KAMIS_CERT_KEY or "111", cert_id=KAMIS_CERT_ID or "222"
     )
     codebook = CodeBook(client)
-    searcher = LLMProductSearcher(DB_PATH)
 
-    tools = make_tools(client, codebook, searcher)  # ← 검색기 주입
+    # LLMHierarchicalSearcher 초기화
+    try:
+        searcher = LLMHierarchicalSearcher(DB_PATH)
+    except FileNotFoundError as e:
+        print(f"[오류] 데이터베이스 파일을 찾을 수 없습니다: {e}", file=sys.stderr)
+        sys.exit(1)
+    except Exception as e:
+        print(f"[오류] 검색기 초기화 실패: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    tools = make_tools(client, codebook, searcher)
     llm = ChatOpenAI(
         model=args.model,
         temperature=0,
-        reasoning_effort="minimal",
         api_key=OPENAI_API_KEY,
     )
 
@@ -682,7 +725,12 @@ def main():
 
     # LangGraph 실행
     state: AgentState = {"messages": [HumanMessage(content=args.query)], "trace": []}
-    out = app.invoke(state)
+
+    try:
+        out = app.invoke(state)
+    except Exception as e:
+        print(f"[오류] 에이전트 실행 중 오류 발생: {e}", file=sys.stderr)
+        sys.exit(1)
 
     # trace(optional)
     if args.trace:
