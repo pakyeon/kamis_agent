@@ -1,0 +1,23 @@
+
+# Core dependencies
+python-dotenv==1.1.1
+
+# LLM & Agent
+langchain==0.3.27
+langchain-openai==0.3.33
+langchain-core==0.3.79
+langgraph==0.6.7
+openai==1.108.0
+
+# Data models
+pydantic==2.11.9
+
+# Korean NLP
+kiwipiepy==0.21.0
+
+# Data processing
+pandas==2.3.2
+openpyxl==3.1.5
+
+# HTTP client
+requests==2.32.5

@@ -1,0 +1,217 @@
+# -*- coding: utf-8 -*-
+"""KAMIS API 엔드포인트 정의"""
+
+from typing import Dict, Any
+
+# 17개 KAMIS API 정의
+API_ENDPOINTS: Dict[str, Dict[str, Any]] = {
+    "daily_by_category": {
+        "action": "dailyPriceByCategoryList",
+        "desc": "일별 부류별 가격. 부류코드(100=식량,200=채소,300=과일,400=특용,500=축산,600=수산) 전체 조회시",
+        "fields": {
+            "p_returntype": "반환 형식(json, xml)",
+            "p_product_cls_code": "구분(01=소매,02=도매)",
+            "p_item_category_code": "부류코드(100-600)",
+            "p_country_code": "시군구코드",
+            "p_regday": {"desc": "조회일자 YYYY-MM-DD", "required": True},
+            "p_convert_kg_yn": "kg환산(Y/N)",
+        },
+    },
+    "daily_by_item_period": {
+        "action": "periodProductList",
+        "desc": "일별 품목별 가격(기간, 당일로부터 1년간의 데이터만 제공). 특정 품목 일자별 추이",
+        "fields": {
+            "p_returntype": "반환 형식(json, xml)",
+            "p_startday": "시작일 YYYY-MM-DD",
+            "p_endday": "종료일 YYYY-MM-DD",
+            "p_productclscode": "구분(01=소매, 02=도매)",
+            "p_itemcategorycode": "부류코드",
+            "p_itemcode": {"desc": "품목코드", "required": True},
+            "p_kindcode": "품종코드",
+            "p_productrankcode": "등급코드",
+            "p_countrycode": "시군구코드",
+            "p_convert_kg_yn": "kg환산(Y/N)",
+        },
+    },
+    "monthly_sales": {
+        "action": "monthlySalesList",
+        "desc": "월별 평균가격. 월 단위 집계",
+        "fields": {
+            "p_returntype": "반환 형식(json, xml)",
+            "p_yyyy": "기준연도",
+            "p_period": "조회기간(년수, default: 3)",
+            "p_itemcategorycode": "부류코드",
+            "p_itemcode": {"desc": "품목코드", "required": True},
+            "p_kindcode": "품종코드",
+            "p_graderank": "등급순위",
+            "p_countrycode": "시군구코드",
+            "p_convert_kg_yn": "kg환산(Y/N)",
+        },
+    },
+    "yearly_sales": {
+        "action": "yearlySalesList",
+        "desc": "연별 평균가격. 1년 초과 장기동향 질문시 필수",
+        "fields": {
+            "p_returntype": "반환 형식(json, xml)",
+            "p_yyyy": "기준연도",
+            "p_itemcategorycode": "부류코드",
+            "p_itemcode": {"desc": "품목코드", "required": True},
+            "p_kindcode": "품종코드",
+            "p_graderank": "등급순위",
+            "p_countrycode": "시군구코드",
+            "p_convert_kg_yn": "kg환산(Y/N)",
+        },
+    },
+    "old_eco_period": {
+        "action": "periodNaturePriceList",
+        "desc": "친환경 농산물 가격정보(2005~2020.3)",
+        "fields": {
+            "p_returntype": "반환 형식(json, xml)",
+            "p_startday": {"desc": "시작일", "required": True},
+            "p_endday": {"desc": "종료일", "required": True},
+            "p_itemcategorycode": "부류코드",
+            "p_itemcode": {"desc": "품목코드", "required": True},
+            "p_kindcode": "품종코드",
+            "p_productrankcode": "등급코드",
+            "p_countrycode": "시군구코드",
+            "p_convert_kg_yn": "kg환산(Y/N)",
+        },
+    },
+    "daily_sales_list": {
+        "action": "dailySalesList",
+        "desc": "최근일자 전체 가격정보",
+        "fields": {
+            "p_returntype": "반환 형식(json, xml)",
+        },
+    },
+    "recent_price_trend": {
+        "action": "recentlyPriceTrendList",
+        "desc": "최근 가격 동향. '최근'과 같은 모호한 표현 사용 또는 기간을 명시하지 않을 경우 사용",
+        "fields": {
+            "p_returntype": "반환 형식(json, xml)",
+            "p_regday": "기준일자",
+            "p_productno": {"desc": "품목코드", "required": True},
+        },
+    },
+    "monthly_price_trend": {
+        "action": "monthlyPriceTrendList",
+        "desc": "월평균 동향. 월별 트렌드 분석",
+        "fields": {
+            "p_returntype": "반환 형식(json, xml)",
+            "p_productno": {"desc": "품목코드", "required": True},
+            "p_regday": "기준일자",
+        },
+    },
+    "yearly_price_trend": {
+        "action": "yearlyPriceTrendList",
+        "desc": "연평균 동향. 장기 트렌드 분석",
+        "fields": {
+            "p_returntype": "반환 형식(json, xml)",
+            "p_productno": {"desc": "품목코드", "required": True},
+            "p_regday": "기준일자",
+        },
+    },
+    "daily_county": {
+        "action": "dailyCountyList",
+        "desc": "지역별 최근가격. 특정지역 전체품목",
+        "fields": {
+            "p_returntype": "반환 형식(json, xml)",
+            "p_countrycode": {"desc": "시군구코드", "required": True},
+        },
+    },
+    "old_eco_item": {
+        "action": "NaturePriceList",
+        "desc": "친환경가격(2005-2020.3). 특정일자",
+        "fields": {
+            "p_returntype": "반환 형식(json, xml)",
+            "p_regday": "조회일자",
+            "p_itemcategorycode": "부류코드",
+            "p_itemcode": {"desc": "품목코드", "required": True},
+            "p_kindcode": "품종코드",
+            "p_productrankcode": "등급코드",
+            "p_countrycode": "시군구코드",
+            "p_convert_kg_yn": "kg환산(Y/N)",
+        },
+    },
+    "new_eco_period": {
+        "action": "periodEcoPriceList",
+        "desc": "친환경농산물 가격정보(2020.4-현재). 특정기간",
+        "fields": {
+            "p_returntype": "반환 형식(json, xml)",
+            "p_startday": "시작일",
+            "p_endday": "종료일",
+            "p_itemcategorycode": "부류코드",
+            "p_itemcode": {"desc": "품목코드", "required": True},
+            "p_kindcode": "품종코드",
+            "p_productrankcode": "등급코드",
+            "p_countrycode": "시군구코드",
+            "p_convert_kg_yn": "kg환산(Y/N)",
+        },
+    },
+    "new_eco_item": {
+        "action": "EcoPriceList",
+        "desc": "친환경농산물 품목별가격(2020.4-현재), 특정일",
+        "fields": {
+            "p_returntype": "반환 형식(json, xml)",
+            "p_regday": "조회일자",
+            "p_itemcategorycode": "부류코드",
+            "p_itemcode": {"desc": "품목코드", "required": True},
+            "p_kindcode": "품종코드",
+            "p_productrankcode": "등급코드",
+            "p_countrycode": "시군구코드",
+            "p_convert_kg_yn": "kg환산(Y/N)",
+        },
+    },
+    "region_item": {
+        "action": "ItemInfo",
+        "desc": "지역별 품목별 가격정보. 특정품목+지역 조합시. 지역 비교 시 반복 호출, 시군구코드 미입력 시 전체 지역 비교 가능",
+        "fields": {
+            "p_returntype": "반환 형식(json, xml)",
+            "p_productclscode": "구분(01=소매,02=도매)",
+            "p_regday": "조회일자",
+            "p_itemcategorycode": "부류코드",
+            "p_itemcode": {"desc": "품목코드", "required": True},
+            "p_kindcode": "품종코드",
+            "p_productrankcode": "등급코드",
+            "p_countrycode": "시군구코드(필수)",
+            "p_convert_kg_yn": "kg환산(Y/N)",
+        },
+    },
+    "product_info": {
+        "action": "productInfo",
+        "desc": "농수산물 품목 및 등급 코드표. 축산물을 제외한 농수산물 목록 반환, search_item 실패시 사용",
+        "fields": {
+            "p_returntype": "반환 형식(json, xml)",
+        },
+    },
+    "period_wholesale": {
+        "action": "periodWholesaleProductList",
+        "desc": "일별 품목별 도매가격. 도매전용",
+        "fields": {
+            "p_returntype": "반환 형식(json, xml)",
+            "p_startday": "시작일",
+            "p_endday": "종료일",
+            "p_countrycode": "시군구코드",
+            "p_itemcategorycode": "부류코드",
+            "p_itemcode": {"desc": "품목코드", "required": True},
+            "p_kindcode": "품종코드",
+            "p_productrankcode": "등급코드",
+            "p_convert_kg_yn": "kg환산(Y/N)",
+        },
+    },
+    "period_retail": {
+        "action": "periodRetailProductList",
+        "desc": "일별소매가격. 소매전용",
+        "fields": {
+            "p_returntype": "반환 형식(json, xml)",
+            "p_startday": "시작일",
+            "p_endday": "종료일",
+            "p_countrycode": "시군구코드",
+            "p_itemcategorycode": "부류코드",
+            "p_itemcode": {"desc": "품목코드", "required": True},
+            "p_kindcode": "품종코드",
+            "p_productrankcode": "등급코드",
+            "p_convert_kg_yn": "kg환산(Y/N)",
+        },
+    },
+}
