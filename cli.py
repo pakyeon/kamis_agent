@@ -3,7 +3,6 @@
 
 import sys
 import argparse
-import json
 import logging
 
 from service import KamisService
@@ -25,7 +24,6 @@ def main():
     # query 명령
     query_parser = subparsers.add_parser("query", help="질의 (자연어 답변)")
     query_parser.add_argument("text", help="자연어 질문")
-    query_parser.add_argument("--raw", action="store_true", help="구조화된 데이터 반환")
 
     # search 명령어
     search_parser = subparsers.add_parser("search", help="품목 검색")
@@ -63,14 +61,8 @@ def handle_query(service: KamisService, args):
     """통합 질의"""
     print(f"\n💬 질문: {args.text}\n")
 
-    if args.raw:
-        # 구조화된 데이터
-        result = service.search(args.text)
-        print(json.dumps(result, ensure_ascii=False, indent=2))
-    else:
-        # 자연어 답변
-        answer = service.answer(args.text)
-        print(f"답변: {answer}\n")
+    answer = service.answer(args.text)
+    print(f"답변: {answer}\n")
 
 
 def handle_search(service: KamisService, args):
