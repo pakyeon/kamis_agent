@@ -55,7 +55,7 @@ Agent가 자동으로 여러 Tool을 조합
 """
 
 from .service import KamisService
-from .types import ItemInfo, PriceInfo, PriceTrend
+from .schemas import ItemInfo, PriceInfo, PriceTrend
 from .exceptions import (
     KamisError,
     ConfigError,
