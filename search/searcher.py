@@ -96,29 +96,33 @@ class HierarchicalSearcher:
 
     def search(self, natural_query: str, top_k: int = 10) -> List[Dict]:
         """
-        자연어 쿼리로 품목 검색
+        자연어 쿼리로 농축수산물 계층 정보 검색
+
+        부류(category), 품목(product), 품종(kind), 등급(grade)의
+        전체 계층 구조를 반환합니다.
 
         Args:
-            natural_query: 자연어 검색어 (예: "후지 사과 상품")
+            natural_query: 자연어 검색어 (예: "후지 사과 상품", "돼지고기 삼겹살 1등급")
             top_k: 최대 반환 개수
 
         Returns:
-            검색 결과 리스트 (계층 구조)
+            계층 정보 리스트 (category, product, kind, grade 포함)
+            각 항목은 코드(code)와 이름(name)을 포함
         """
-        # 1. LLM으로 키워드 추출
+        # 1. LLM으로 계층별 키워드 추출
         keywords = self._extract_keywords(natural_query)
-        logger.info(f"추출된 키워드: {keywords}")
+        logger.info(f"추출된 계층별 키워드: {keywords}")
 
         # 2. 계층적 검색 수행
         raw_results = self._hierarchical_search(keywords)
 
-        # 3. 결과 구조화
+        # 3. 결과 구조화 (category, product, kind, grade)
         structured = self._structure_results(raw_results)
 
         return structured[:top_k]
 
     def _extract_keywords(self, query: str) -> HierarchicalKeywords:
-        """LLM으로 계층별 키워드 추출"""
+        """LLM으로 계층별 키워드 추출 (부류/품목/품종/등급)"""
         if not self._structured_llm or not self._prompt:
             # LLM 없으면 단순 정규화
             logger.warning("LLM 없음. 단순 텍스트 정규화 사용")
@@ -141,12 +145,12 @@ class HierarchicalSearcher:
                 grades=[self.text_processor.normalize(k) for k in result.grades if k],
             )
         except Exception as e:
-            logger.warning(f"LLM 추출 실패: {e}. 단순 정규화 사용")
+            logger.warning(f"LLM 키워드 추출 실패: {e}. 단순 정규화 사용")
             normalized = self.text_processor.normalize(query)
             return HierarchicalKeywords(products=[normalized])
 
     def _hierarchical_search(self, keywords: HierarchicalKeywords) -> List[Dict]:
-        """계층적 검색 수행"""
+        """계층적 검색 수행 (부류→품목→품종/등급 필터링)"""
         product_codes = set()
 
         # 1단계: 품목 검색
@@ -154,7 +158,7 @@ class HierarchicalSearcher:
             query, params = self.query_builder.build_product_search(keywords.products)
             rows = self.db.execute(query, tuple(params))
             product_codes = {row["product_code"] for row in rows}
-            logger.info(f"품목 검색: {len(product_codes)}개")
+            logger.info(f"품목 검색 결과: {len(product_codes)}개")
 
         # 2단계: 부류로 필터링
         if keywords.categories:
@@ -179,24 +183,25 @@ class HierarchicalSearcher:
                 rows = self.db.execute(query, tuple(params))
                 product_codes = {row["product_code"] for row in rows}
 
-            logger.info(f"부류 필터 후: {len(product_codes)}개")
+            logger.info(f"부류 필터링 후: {len(product_codes)}개")
 
         if not product_codes:
             logger.warning("검색된 품목 없음")
             return []
 
-        # 3단계: 각 품목의 계층 정보 조회
+        # 3단계: 각 품목의 전체 계층 정보 조회 (품종/등급 포함)
         results = []
         for product_code in product_codes:
             items = self._get_hierarchy_info(product_code, keywords)
             results.extend(items)
 
+        logger.info(f"최종 계층 정보: {len(results)}개")
         return results
 
     def _get_hierarchy_info(
         self, product_code: str, keywords: HierarchicalKeywords
     ) -> List[Dict]:
-        """품목의 전체 계층 정보 조회"""
+        """품목의 전체 계층 정보 조회 (부류/품목/품종/등급)"""
         # 축산물 여부 확인
         check_query = (
             "SELECT category_code FROM api_items WHERE product_code = ? LIMIT 1"
@@ -208,7 +213,7 @@ class HierarchicalSearcher:
 
         is_livestock = rows[0]["category_code"] == self.LIVESTOCK_CATEGORY_CODE
 
-        # 계층 정보 조회
+        # 전체 계층 정보 조회 (품종/등급 필터링 포함)
         query, params = self.query_builder.build_hierarchy_search(
             product_code, keywords.kinds, keywords.grades, is_livestock
         )
@@ -217,7 +222,7 @@ class HierarchicalSearcher:
         return [dict(row) for row in rows]
 
     def _structure_results(self, raw_results: List[Dict]) -> List[Dict]:
-        """검색 결과를 구조화된 형태로 변환"""
+        """검색 결과를 구조화된 계층 형태로 변환 (category/product/kind/grade)"""
         structured = []
 
         for item in raw_results:
