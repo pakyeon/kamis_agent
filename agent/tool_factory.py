@@ -38,7 +38,7 @@ class ToolFactory:
         """모든 Tool 생성"""
         tools = []
 
-        # 1. 품목 검색 Tool
+        # 1. 계층 정보 검색 Tool
         tools.append(self._create_search_tool())
 
         # 2. API Tools
@@ -48,22 +48,24 @@ class ToolFactory:
         return tools
 
     def _create_search_tool(self) -> StructuredTool:
-        """품목 검색 Tool"""
+        """농축수산물 계층 정보 검색 Tool"""
 
         class SearchInput(BaseModel):
-            natural_query: str = Field(description="품목명 또는 자연어")
+            natural_query: str = Field(
+                description="품목/품종/등급 검색어 (예: '사과', '후지 사과', '배추 상품', '돼지고기 삼겹살 1등급')"
+            )
             top_k: int = Field(default=3, ge=1, le=10, description="결과 개수")
 
         def search_item(natural_query: str, top_k: int = 3) -> Dict[str, Any]:
             """
-            품목명을 품목코드로 변환
+            농축수산물 계층 정보 검색 (부류/품목/품종/등급)
 
             Args:
-                natural_query: 품목명 (예: "사과", "돼지고기")
+                natural_query: 검색어 (예: "사과", "후지 사과 상품", "돼지고기 삼겹살 1등급")
                 top_k: 반환 개수
 
             Returns:
-                품목 정보 리스트
+                계층 정보 리스트 (category, product, kind, grade 포함)
             """
             if not natural_query.strip():
                 return {"error": "검색어 필요"}
@@ -76,38 +78,71 @@ class ToolFactory:
             if not results:
                 return {"candidates": [], "note": "결과없음"}
 
-            # 중복 제거 및 정리
+            # 결과 정리
             candidates = []
-            seen = set()
 
             for item in results:
-                prod = item.get("product", {})
-                code = prod.get("code")
-                name = prod.get("name")
-                key = f"{code}_{name}"
+                # 부류
+                cat = item.get("category", {})
+                cat_code = cat.get("code")
+                cat_name = cat.get("name")
 
-                if key not in seen:
-                    seen.add(key)
-                    candidates.append(
-                        {
-                            "product_code": code,
-                            "product_name": name,
-                            "category": item.get("category"),
-                            "kind": item.get("kind"),
-                            "grade": item.get("grade"),
-                        }
-                    )
+                # 품목
+                prod = item.get("product", {})
+                prod_code = prod.get("code")
+                prod_name = prod.get("name")
+
+                # 품종
+                kind = item.get("kind", {})
+                kind_code = kind.get("code")
+                kind_name = kind.get("name")
+
+                # 등급
+                grade = item.get("grade", {})
+                # 축산물과 일반 품목의 등급 코드가 다름
+                grade_code = grade.get("code") or grade.get("productrank_code")
+                grade_name = grade.get("name")
+
+                candidate = {
+                    "category_code": cat_code,
+                    "category_name": cat_name,
+                    "product_code": prod_code,
+                    "product_name": prod_name,
+                }
+
+                if kind_code:
+                    candidate["kind_code"] = kind_code
+                    candidate["kind_name"] = kind_name
+
+                if grade_code:
+                    candidate["grade_code"] = grade_code
+                    candidate["grade_name"] = grade_name
+
+                candidates.append(candidate)
+
+            usage_note = """
+사용법:
+- product_code → p_itemcode 또는 p_productno
+- kind_code → p_kindcode  
+- grade_code → p_productrankcode
+- 품종/등급 코드를 API 파라미터로 전달하여 정확한 검색 수행
+            """.strip()
 
             return {
                 "candidates": candidates,
-                "note": f"{len(candidates)}개 발견. product_code를 p_itemcode로 사용",
+                "count": len(candidates),
+                "note": usage_note,
             }
 
         return StructuredTool.from_function(
             name="search_item",
             func=search_item,
             args_schema=SearchInput,
-            description="품목명→코드변환. 품목명 나오면 필수호출. 예:사과,배추,돼지고기,고등어",
+            description=(
+                "농축수산물 계층 정보(부류/품목/품종/등급) 검색. "
+                "품목명 인식 시 필수 호출. "
+                "예: '사과', '후지 사과', '배추 상품', '돼지고기 삼겹살 1등급'"
+            ),
         )
 
     def _create_api_tool(self, name: str, spec: Dict[str, Any]) -> StructuredTool:
@@ -115,10 +150,15 @@ class ToolFactory:
 
         # Pydantic 모델 동적 생성
         fields = {}
-        for param_name, param_spec in spec.get("parameters", {}).items():
+        for param_name, param_spec in spec.get("fields", {}).items():
+            if isinstance(param_spec, dict):
+                desc = param_spec.get("desc", "")
+            else:
+                desc = param_spec or ""
+
             fields[param_name] = (
                 Optional[str],
-                Field(default=None, description=param_spec.get("description", "")),
+                Field(default=None, description=desc),
             )
 
         InputModel = create_model(f"{name}_Input", **fields)
@@ -144,11 +184,11 @@ class ToolFactory:
                 return {"error": str(e)}
 
         # 파라미터 목록 생성
-        param_list = ", ".join(spec.get("parameters", {}).keys()) or "없음"
+        param_list = ", ".join(spec.get("fields", {}).keys()) or "없음"
 
         return StructuredTool.from_function(
             name=name,
             func=api_call,
             args_schema=InputModel,
-            description=f"{spec['description']}. 파라미터: {param_list}",
+            description=f"{spec['desc']}. 파라미터: {param_list}",
         )
