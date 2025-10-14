@@ -10,8 +10,8 @@ API_ENDPOINTS: Dict[str, Dict[str, Any]] = {
         "desc": "일별 부류별 가격. 부류코드(100=식량,200=채소,300=과일,400=특용,500=축산,600=수산) 전체 조회시",
         "fields": {
             "p_returntype": "반환 형식(json, xml)",
-            "p_product_cls_code": "구분(01=소매,02=도매)",
-            "p_item_category_code": "부류코드(100-600)",
+            "p_product_cls_code": "구분(01=소매, 02=도매)",
+            "p_item_category_code": {"desc": "부류코드(100~600)", "required": True},
             "p_country_code": "시군구코드",
             "p_regday": {"desc": "조회일자 YYYY-MM-DD", "required": True},
             "p_convert_kg_yn": "kg환산(Y/N)",
