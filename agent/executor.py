@@ -13,7 +13,7 @@ from typing_extensions import TypedDict
 from ..core.client import KamisClient
 from ..search import HierarchicalSearcher
 from .tool_factory import ToolFactory
-from .prompts import SYSTEM_PROMPT
+from .prompts import get_system_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +55,7 @@ class KamisAgent:
         # Agent Node
         def call_model(state: AgentState):
             """LLM 호출"""
-            messages = [SystemMessage(content=SYSTEM_PROMPT)] + state["messages"]
+            messages = [SystemMessage(content=get_system_prompt)] + state["messages"]
             response = self.llm.bind_tools(self.tools).invoke(messages)
             return {"messages": state["messages"] + [response]}
 
