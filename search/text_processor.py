@@ -43,13 +43,11 @@ class TextProcessor:
             t.form
             for t in self.kiwi.tokenize(text)
             if not (
-                t.tag.startswith("J")  # 조사
-                or t.tag.startswith("E")  # 어미
-                or t.tag.startswith("S")  # 부호
+                t.tag.startswith("J") or t.tag.startswith("E") or t.tag.startswith("S")
             )
         ]
 
-        return " ".join(tokens)
+        return "".join(tokens)
 
     def extract_digits(self, text: str) -> List[str]:
         """텍스트에서 숫자 추출"""
