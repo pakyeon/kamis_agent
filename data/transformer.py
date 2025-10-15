@@ -27,6 +27,11 @@ class DataTransformer:
         "등급코드(periodProductName)": "p_periodProductName",
     }
 
+    def __init__(self):
+        from ..search.text_processor import TextProcessor
+
+        self.processor = TextProcessor()
+
     def transform(self, sheets_data: Dict[str, pd.DataFrame]) -> pd.DataFrame:
         """
         시트 데이터 병합 및 변환
@@ -53,6 +58,15 @@ class DataTransformer:
         # 4. 중복 제거
         final = final.drop_duplicates().reset_index(drop=True)
         logger.info(f"중복 제거 후: {len(final)}행")
+
+        # 5. 텍스트 컬럼 정규화
+        text_columns = ["category_name", "product_name", "kind_name", "rank_name"]
+
+        for col in text_columns:
+            if col in final.columns:
+                final[col] = final[col].apply(
+                    lambda x: self.processor.normalize(x) if pd.notna(x) else x
+                )
 
         return final
 
