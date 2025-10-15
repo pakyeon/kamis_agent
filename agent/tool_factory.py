@@ -52,20 +52,20 @@ class ToolFactory:
 
         class SearchInput(BaseModel):
             natural_query: str = Field(
-                description="품목/품종/등급 검색어 (예: '사과', '후지 사과', '배추 상품', '돼지고기 삼겹살 1등급')"
+                description="품목/품종/등급/지역/시장 검색어 (예: '사과', '후지 사과', '서울 배추 상품', '서울 부산 돼지고기 도매')"
             )
             top_k: int = Field(default=3, ge=1, le=10, description="결과 개수")
 
         def search_item(natural_query: str, top_k: int = 3) -> Dict[str, Any]:
             """
-            농축수산물 계층 정보 검색 (부류/품목/품종/등급)
+            농축수산물 계층 정보 검색 (부류/품목/품종/등급/지역/시장)
 
             Args:
-                natural_query: 검색어 (예: "사과", "후지 사과 상품", "돼지고기 삼겹살 1등급")
+                natural_query: 검색어 (예: "사과", "서울 후지 사과 상품", "서울 부산 돼지고기 삼겹살 1등급 도매")
                 top_k: 반환 개수
 
             Returns:
-                계층 정보 리스트 (category, product, kind, grade 포함)
+                계층 정보 리스트 (category, product, kind, grade, region, market 포함)
             """
             if not natural_query.strip():
                 return {"error": "검색어 필요"}
@@ -78,7 +78,7 @@ class ToolFactory:
             if not results:
                 return {"candidates": [], "note": "결과없음"}
 
-            # 결과 정리
+            # 결과 정리 (평탄화)
             candidates = []
 
             for item in results:
@@ -99,10 +99,14 @@ class ToolFactory:
 
                 # 등급
                 grade = item.get("grade", {})
-                # 축산물과 일반 품목의 등급 코드가 다름
-                grade_code = grade.get("code") or grade.get("productrank_code")
-                grade_name = grade.get("name")
 
+                # 지역 (리스트)
+                regions = item.get("regions", [])
+
+                # 시장
+                market = item.get("market", {})
+
+                # 기본 정보
                 candidate = {
                     "category_code": cat_code,
                     "category_name": cat_name,
@@ -110,22 +114,77 @@ class ToolFactory:
                     "product_name": prod_name,
                 }
 
+                # 품종 정보
                 if kind_code:
                     candidate["kind_code"] = kind_code
                     candidate["kind_name"] = kind_name
 
-                if grade_code:
-                    candidate["grade_code"] = grade_code
-                    candidate["grade_name"] = grade_name
+                # 등급 정보 (축산물 vs 일반품목)
+                if grade:
+                    candidate["grade_name"] = grade.get("name")
+
+                    # 축산물: code 필드
+                    if grade.get("code"):
+                        candidate["grade_code"] = grade.get("code")
+
+                    # 일반품목: productrank_code, graderank_code
+                    if grade.get("productrank_code"):
+                        candidate["grade_productrank_code"] = grade.get(
+                            "productrank_code"
+                        )
+                    if grade.get("graderank_code"):
+                        candidate["grade_graderank_code"] = grade.get("graderank_code")
+
+                # 지역 정보 평탄화
+                if regions:
+                    candidate["region_codes"] = [
+                        r.get("code") for r in regions if r.get("code")
+                    ]
+                    candidate["region_names"] = [r.get("name") for r in regions]
+
+                    # 에러 정보가 있는 지역
+                    errors = [r.get("error") for r in regions if r.get("error")]
+                    if errors:
+                        candidate["region_errors"] = errors
+
+                    # 소매 전용 코드 (도매 시장에 없는 지역)
+                    retail_codes = [
+                        r.get("retail_code") for r in regions if r.get("retail_code")
+                    ]
+                    if retail_codes:
+                        candidate["region_retail_codes"] = retail_codes
+
+                # 시장 정보
+                if market.get("code"):
+                    candidate["market_code"] = market.get("code")
+                    candidate["market_name"] = market.get("name")
 
                 candidates.append(candidate)
 
             usage_note = """
-사용법:
-- product_code → p_itemcode 또는 p_productno
-- kind_code → p_kindcode  
-- grade_code → p_productrankcode
-- 품종/등급 코드를 API 파라미터로 전달하여 정확한 검색 수행
+# 반환 필드 → API 파라미터 매핑
+
+계층 정보:
+  product_code → p_itemcode 또는 p_productno
+  kind_code → p_kindcode
+  category_code → p_itemcategorycode 또는 p_item_category_code
+
+등급 코드 (축산물 vs 일반품목):
+  축산물(category_code=500):
+    grade_code → p_productrankcode
+  일반품목:
+    grade_productrank_code → p_productrankcode
+    grade_graderank_code → p_graderank (monthly_sales, yearly_sales만)
+
+지역/시장:
+  region_codes[i] → p_countrycode (각 지역별 개별 호출)
+  market_code → p_productclscode 또는 p_product_cls_code
+
+필드 설명:
+  region_codes: 조회 가능한 지역코드 리스트
+  region_names: 지역명 (참고용)
+  region_errors: 매핑 실패한 지역 (있는 경우)
+  market_name: "소매" 또는 "도매" (참고용)
             """.strip()
 
             return {
@@ -138,11 +197,7 @@ class ToolFactory:
             name="search_item",
             func=search_item,
             args_schema=SearchInput,
-            description=(
-                "농축수산물 계층 정보(부류/품목/품종/등급) 검색. "
-                "품목명 인식 시 필수 호출. "
-                "예: '사과', '후지 사과', '배추 상품', '돼지고기 삼겹살 1등급'"
-            ),
+            description=("농축수산물 계층 정보(부류/품목/품종/등급/지역/시장) 검색"),
         )
 
     def _create_api_tool(self, name: str, spec: Dict[str, Any]) -> StructuredTool:
