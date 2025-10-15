@@ -2,13 +2,11 @@
 """LangGraph Agent 실행기"""
 
 import logging
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any
 
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from langchain_openai import ChatOpenAI
-from langgraph.graph import StateGraph, END
-from langgraph.prebuilt import ToolNode
-from typing_extensions import TypedDict
+from langgraph.prebuilt import create_react_agent
 
 from ..core.client import KamisClient
 from ..search import HierarchicalSearcher
@@ -18,14 +16,8 @@ from .prompts import get_system_prompt
 logger = logging.getLogger(__name__)
 
 
-class AgentState(TypedDict):
-    """Agent 상태"""
-
-    messages: List[Any]
-
-
 class KamisAgent:
-    """KAMIS Agent (LangGraph 기반)"""
+    """KAMIS Agent (LangGraph create_react_agent 기반)"""
 
     def __init__(
         self,
@@ -41,49 +33,18 @@ class KamisAgent:
         tool_factory = ToolFactory(client, searcher)
         self.tools = tool_factory.create_all_tools()
 
-        # LangGraph 구성
+        # LangGraph Agent 구성 (create_react_agent 사용)
         self.graph = self._build_graph()
 
         logger.info(f"Agent 초기화 완료: {len(self.tools)}개 Tool")
 
     def _build_graph(self):
-        """LangGraph 구성"""
-
-        # Tool Node
-        tool_node = ToolNode(self.tools)
-
-        # Agent Node
-        def call_model(state: AgentState):
-            """LLM 호출"""
-            messages = [SystemMessage(content=get_system_prompt)] + state["messages"]
-            response = self.llm.bind_tools(self.tools).invoke(messages)
-            return {"messages": state["messages"] + [response]}
-
-        # 조건부 엣지
-        def should_continue(state: AgentState):
-            """다음 노드 결정"""
-            last_message = state["messages"][-1]
-            if isinstance(last_message, AIMessage) and last_message.tool_calls:
-                return "tools"
-            return "end"
-
-        # Tool Node
-        def call_tools(state: AgentState):
-            """Tool 실행"""
-            return {"messages": state["messages"] + tool_node.invoke(state)["messages"]}
-
-        # Graph 구성
-        workflow = StateGraph(AgentState)
-        workflow.add_node("agent", call_model)
-        workflow.add_node("tools", call_tools)
-
-        workflow.set_entry_point("agent")
-        workflow.add_conditional_edges(
-            "agent", should_continue, {"tools": "tools", "end": END}
+        """LangGraph Agent 구성 (create_react_agent 사용)"""
+        return create_react_agent(
+            self.llm,
+            self.tools,
+            state_modifier=SystemMessage(content=get_system_prompt()),
         )
-        workflow.add_edge("tools", "agent")
-
-        return workflow.compile()
 
     def execute(self, query: str) -> Dict[str, Any]:
         """
@@ -103,6 +64,7 @@ class KamisAgent:
             messages = result.get("messages", [])
             final_message = None
 
+            # 마지막 AIMessage 찾기 (Tool 호출이 아닌)
             for msg in reversed(messages):
                 if isinstance(msg, AIMessage) and not msg.tool_calls:
                     final_message = msg
