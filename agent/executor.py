@@ -43,7 +43,7 @@ class KamisAgent:
         return create_react_agent(
             self.llm,
             self.tools,
-            state_modifier=SystemMessage(content=get_system_prompt()),
+            prompt=SystemMessage(content=get_system_prompt()),
         )
 
     def execute(self, query: str) -> Dict[str, Any]:
