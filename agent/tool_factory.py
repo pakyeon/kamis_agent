@@ -1,5 +1,40 @@
 # -*- coding: utf-8 -*-
-"""LangChain Tool 생성"""
+"""
+LangChain Tool 생성 팩토리
+
+=== 이 파일의 역할 ===
+API_ENDPOINTS 메타데이터를 실제 LangChain Tool 객체로 변환
+
+- StructuredTool 생성: api_endpoints.py의 spec을 Tool로 변환
+- usage_note 제공: resolve_query 실행 후 API 파라미터 매핑 가이드 제공
+- 파라미터 검증: 날짜 형식 등 기본 검증 수행
+
+=== 정보 전달 흐름 ===
+1. resolve_query Tool 실행
+   → 자연어 → 구조화된 데이터 변환
+   → usage_note에 API 파라미터 매핑 방법 포함하여 반환
+
+2. LLM이 usage_note 참조
+   → product_code를 p_itemcode로 매핑하는 방법 이해
+   → 적절한 API Tool 선택 및 파라미터 구성
+
+3. API Tool 실행
+   → KAMIS API 호출 후 결과 반환
+
+=== 관련 파일 ===
+- api_endpoints.py: Tool 메타데이터 (이 파일이 읽어서 사용)
+- searcher.py: resolve_query의 실제 검색 로직
+- core/client.py: KAMIS API HTTP 클라이언트
+
+=== 핵심 컴포넌트 ===
+- resolve_query Tool: 자연어 → 구조화 (가장 중요)
+- API Tools: KAMIS API 래퍼 (api_endpoints.py 기반 자동 생성)
+- usage_note: 런타임에 생성되는 매핑 가이드
+
+=== 유지보수 가이드 ===
+- resolve_query의 usage_note가 핵심 (LLM의 이해를 돕는 유일한 런타임 가이드)
+- API Tool 추가는 api_endpoints.py만 수정하면 자동으로 생성됨
+"""
 
 import datetime as dt
 from typing import List, Dict, Any, Optional

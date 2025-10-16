@@ -1,5 +1,29 @@
 # -*- coding: utf-8 -*-
-"""KAMIS API 엔드포인트 정의"""
+"""
+KAMIS API 엔드포인트 정의
+
+=== 이 파일의 역할 ===
+LangChain Tool의 description으로 사용되는 메타데이터 정의
+
+- LLM이 Tool 선택 시 직접 참고하는 정보 제공
+- tool_factory.py에서 자동으로 Tool 생성 시 사용
+- 각 API의 목적, 사용 시점, 파라미터 설명 포함
+
+=== 정보 전달 흐름 ===
+1. 이 파일의 desc → StructuredTool의 description
+2. LLM이 Tool 목록을 볼 때 이 description 참조
+3. prompts.py의 전략 가이드와 함께 조합되어 의사결정
+
+=== 관련 파일 ===
+- tool_factory.py: 이 데이터를 읽어 LangChain Tool 생성
+- prompts.py: 고수준 전략 및 제약사항 제공
+- searcher.py: resolve_query Tool의 실제 구현
+
+=== 유지보수 가이드 ===
+- API 추가/변경 시 이 파일만 수정하면 됨
+- desc는 간결하되 명확하게 작성 (LLM이 선택 기준으로 사용)
+- 사용 시점, 제약사항을 명확히 표현
+"""
 
 from typing import Dict, Any
 
