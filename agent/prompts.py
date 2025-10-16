@@ -40,11 +40,6 @@ def get_system_prompt() -> str:
 - 도매 시장은 5개 지역만 존재 (서울, 부산, 대구, 광주, 대전)
 - 도매 미지원 지역: 소매 가격으로 대체 또는 가까운 도매 지역 제안
 
-## 시장 구분
-- 도매 요청: period_wholesale, daily_by_category(구분=02) 등 도매 전용 API 사용
-- 소매 요청: period_retail, daily_by_category(구분=01) 등 소매 전용 API 사용
-- 미지정: 소매를 기본값으로 사용
-
 ## 등급 정보
 - 축산물과 일반 품목은 등급 체계가 다름
 

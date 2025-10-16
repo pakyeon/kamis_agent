@@ -7,7 +7,7 @@ from typing import Dict, Any
 API_ENDPOINTS: Dict[str, Dict[str, Any]] = {
     "daily_by_category": {
         "action": "dailyPriceByCategoryList",
-        "desc": "특정일의 부류별 전체 품목 가격정보 조회. 채소류/과일류 등 카테고리 단위 일괄 조회. 부류 전체 품목 파악시 사용",
+        "desc": "특정일의 부류별 전체 품목 가격정보 조회. 채소류/과일류 등 카테고리 단위 일괄 조회. 부류별 전체 품목 파악시에만 사용",
         "fields": {
             "p_returntype": "반환 형식(json, xml)",
             "p_product_cls_code": "구분(01=소매, 02=도매)",
@@ -89,7 +89,7 @@ API_ENDPOINTS: Dict[str, Dict[str, Any]] = {
     # },
     "daily_sales_list": {
         "action": "dailySalesList",
-        "desc": "최근 거래일의 전체 품목 가격정보 조회. 파라미터 없이 모든 품목 일괄 반환. 전체 품목 파악시 사용",
+        "desc": "최근 거래일의 전체 품목 가격정보 조회. 파라미터 없이 모든 품목 일괄 반환. 전체 품목 파악시에만 사용",
         "fields": {
             "p_returntype": "반환 형식(json, xml)",
         },
@@ -211,7 +211,7 @@ API_ENDPOINTS: Dict[str, Dict[str, Any]] = {
     },
     "period_wholesale": {
         "action": "periodWholesaleProductList",
-        "desc": "도매시장 특정 품목 일별 가격정보 조회. 도매가 전용 일별 데이터 제공. 도매 시장 툭종 품목 일별 조회시 사용",
+        "desc": "도매시장 특정 품목 일별 가격정보 조회. 도매가 전용 일별 데이터 제공. 도매 시장 특정 품목 일별 조회시 사용",
         "fields": {
             "p_returntype": "반환 형식(json, xml)",
             "p_startday": "시작일",
