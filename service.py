@@ -93,42 +93,29 @@ class KamisService:
 
     def search(self, natural_query: str) -> Dict[str, Any]:
         """
-        자연어 쿼리 → 검색 결과 (구조화된 데이터)
+        자연어 쿼리 → 검색 결과
+        단순 검색: LLM으로 키워드 추출 → DB 검색 → JSON 반환
 
         Args:
             natural_query: 자연어 질문 (예: "사과 가격", "서울 부산 고등어 비교")
 
         Returns:
-            부류/품목/품종/등급 정보를 포함한 Json 또는 XML 데이터
+            부류/품목/품종/등급 정보를 포함한 Json 데이터
         """
-        if not self._agent:
+        if not self._searcher:
             raise ConfigError(
-                "Agent가 초기화되지 않았습니다. "
-                "OPENAI_API_KEY를 설정하고 KamisService()로 초기화하세요."
+                "검색 엔진이 초기화되지 않았습니다. " "KamisService()로 초기화하세요."
             )
 
         try:
-            # Agent 실행
-            agent_result = self._agent.execute(natural_query)
-
-            if not agent_result.get("success"):
-                return agent_result
-
-            # 검색 결과 추출
-            items = []
-            try:
-                search_results = self._searcher.search(natural_query, top_k=5)
-                if search_results:
-                    items = search_results
-            except Exception as e:
-                logger.warning(f"검색 결과 추출 실패: {e}")
+            # 검색 엔진으로 직접 검색
+            search_results = self._searcher.search(natural_query)
 
             return {
                 "success": True,
                 "query": natural_query,
-                "items": items,
-                "agent_response": agent_result,
-                "message_count": agent_result.get("message_count", 0),
+                "items": search_results,
+                "count": len(search_results),
             }
 
         except Exception as e:
@@ -165,7 +152,7 @@ class KamisService:
             if result.get("success"):
                 return result.get("answer", "답변을 생성할 수 없습니다.")
             else:
-                error_msg = result.get("error", {}).get("message", "알 수 없는 오류")
+                error_msg = result.get("error", "알 수 없는 오류")
                 raise KamisError(f"답변 생성 실패: {error_msg}")
 
         except KamisError:
