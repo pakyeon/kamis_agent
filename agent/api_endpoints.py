@@ -204,7 +204,7 @@ API_ENDPOINTS: Dict[str, Dict[str, Any]] = {
     },
     "product_info": {
         "action": "productInfo",
-        "desc": "전체 품목 코드표 정보. 품목/품종/등급 코드 매핑 제공 (축산물 제외). search_item 실패시에만 사용",
+        "desc": "전체 품목 코드표 정보. 품목/품종/등급 코드 매핑 제공 (축산물 제외). resolve_query 실패시에만 사용",
         "fields": {
             "p_returntype": "반환 형식(json, xml)",
         },

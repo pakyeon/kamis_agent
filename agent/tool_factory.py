@@ -48,24 +48,22 @@ class ToolFactory:
         return tools
 
     def _create_search_tool(self) -> StructuredTool:
-        """농축수산물 계층 정보 검색 Tool"""
+        """자연어 쿼리 해석 Tool"""
 
-        class SearchInput(BaseModel):
-            natural_query: str = Field(
-                description="품목/품종/등급/지역/시장 검색어 (예: '사과', '후지 사과', '서울 배추 상품', '서울 부산 돼지고기 도매')"
-            )
+        class ResolveInput(BaseModel):
+            natural_query: str = Field(description="농축수산물 관련 자연어 쿼리")
             top_k: int = Field(default=3, ge=1, le=10, description="결과 개수")
 
-        def search_item(natural_query: str, top_k: int = 3) -> Dict[str, Any]:
+        def resolve_query(natural_query: str, top_k: int = 3) -> Dict[str, Any]:
             """
-            농축수산물 계층 정보 검색 (부류/품목/품종/등급/지역/시장)
+            자연어 쿼리를 구조화된 API 파라미터로 변환 (부류/품목/품종/등급/지역/시장)
 
             Args:
-                natural_query: 검색어 (예: "사과", "서울 후지 사과 상품", "서울 부산 돼지고기 삼겹살 1등급 도매")
+                natural_query: 자연어 쿼리
                 top_k: 반환 개수
 
             Returns:
-                계층 정보 리스트 (category, product, kind, grade, region, market 포함)
+                API 호출에 필요한 구조화된 정보 (category, product, kind, grade, region, market 포함)
             """
             if not natural_query.strip():
                 return {"error": "검색어 필요"}
@@ -162,7 +160,7 @@ class ToolFactory:
                 candidates.append(candidate)
 
             usage_note = """
-# 반환 필드 → API 파라미터 매핑
+# resolve_query 반환 필드 → API 파라미터 매핑
 
 계층 정보:
   product_code → p_itemcode 또는 p_productno
@@ -194,10 +192,13 @@ class ToolFactory:
             }
 
         return StructuredTool.from_function(
-            name="search_item",
-            func=search_item,
-            args_schema=SearchInput,
-            description=("농축수산물 계층 정보(부류/품목/품종/등급/지역/시장) 검색"),
+            name="resolve_query",
+            func=resolve_query,
+            args_schema=ResolveInput,
+            description=(
+                "자연어 쿼리를 API 파라미터로 변환"
+                "부류/품목/품종/등급/지역/시장 정보가 필요한 대부분의 API 호출 전 필수로 사용"
+            ),
         )
 
     def _create_api_tool(self, name: str, spec: Dict[str, Any]) -> StructuredTool:

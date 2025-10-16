@@ -174,22 +174,22 @@ class KamisService:
             logger.error(f"답변 생성 중 오류: {e}")
             raise KamisError(f"답변 생성 실패: {e}") from e
 
-    # ===== 내부 메서드 (Agent가 사용) =====
+    # ===== 내부 메서드 =====
 
-    def search_item(
+    def resolve_query(
         self,
         query_text: str,
-        top_k: int = 1,
+        top_k: int = 3,
     ) -> Optional[Dict[str, Any]]:
         """
-        검색 (내부용 - Agent Tool로 사용)
+        자연어 쿼리 해석
 
         Args:
-            query_text: 검색 쿼리
+            query_text: 자연어 쿼리
             top_k: 반환할 결과 개수
 
         Returns:
-            검색 결과 (부류/품목/품종/등급 포함)
+            구조화된 정보 (부류/품목/품종/등급/지역/시장 포함)
         """
         if not self._searcher:
             self.initialize()
