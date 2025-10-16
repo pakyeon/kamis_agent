@@ -8,7 +8,16 @@ from kiwipiepy import Kiwi
 
 
 class TextProcessor:
-    """텍스트 전처리 및 토큰화"""
+    """
+    한국어 텍스트 정규화
+
+    유니코드 정규화만으로는 한국어 검색 매칭이 어려운 문제를 해결하기 위해
+    형태소 분석기(kiwipiepy)를 사용하여 조사/어미/기호를 제거합니다.
+
+    사용처:
+        - data/transformer.py: DB 적재 전 품목명/품종명 정규화
+        - search/searcher.py: LLM이 추출한 키워드 정규화
+    """
 
     # 정규표현식 패턴 (컴파일하여 재사용)
     _SIMPLE_CLEAN_RE = re.compile(r"[^\w\s가-힣]")
@@ -27,6 +36,11 @@ class TextProcessor:
 
         Returns:
             정규화된 텍스트 (공백으로 구분된 토큰)
+
+        처리 과정:
+            1. 유니코드 정규화 (NFKC)
+            2. 특수문자 제거
+            3. 형태소 분석으로 조사(J), 어미(E), 기호(S) 제거
         """
         if not text:
             return ""
@@ -39,6 +53,9 @@ class TextProcessor:
         text = self._WHITESPACE_RE.sub(" ", text).strip()
 
         # 3. 형태소 분석 및 불필요한 품사 제거
+        # J (조사): ~의, ~를, ~에게
+        # E (어미): ~ㅂ니다, ~었다
+        # S (기호): !, ?, ,
         tokens = [
             t.form
             for t in self.kiwi.tokenize(text)
