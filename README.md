@@ -54,11 +54,16 @@ kamis = KamisService()
 data = kamis.search("오늘 사과 가격")
 print(data)
 # {
-#     "success": True,
-#     "data": {
-#         "query": "오늘 사과 가격",
-#         "results": [...]
+#   "success": true,
+#   "query": "사과 가격",
+#   "items": [
+#     {
+#       "category": {
+#         "code": "400",
+#         "name": "과일류"
+#       },
 #     }
+#   ]
 # }
 
 # 2️⃣ 자연어 답변 (사용자용)
@@ -84,13 +89,33 @@ data = kamis.search("지난 3개월 서울과 부산의 배추 가격 비교")
 
 # 반환 형식
 {
-    "success": True,
-    "data": {
-        "query": "...",
-        "results": [...],
-        "tools_used": ["search_item", "daily_by_item_period"]
-    },
-    "message_count": 5
+  "success": true,
+  "query": "사과 가격",
+  "items": [
+    {
+      "category": {
+        "code": "400",
+        "name": "과일류"
+      },
+      "product": {
+        "code": "411",
+        "name": "사과"
+      },
+      "kind": {
+        "code": "6",
+        "name": "쓰가루아오리"
+      },
+      "grade": {
+        "productrank_code": "4",
+        "graderank_code": "1",
+        "name": "상품"
+      },
+      "market": {
+        "code": "01",
+        "name": "소매"
+      }
+    }, ...
+  ]
 }
 ```
 
